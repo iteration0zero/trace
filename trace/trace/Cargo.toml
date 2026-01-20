@@ -1,0 +1,13 @@
+[package]
+name = "trace"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+smallvec = { version = "1.11", features = ["union", "const_new"] }
+rustc-hash = "1.1"
+# using 0.8 as it is stable
+rand = "0.8" 
+rayon = "1.7"

@@ -1,0 +1,31 @@
+Trace REPL
+(n (n n)) based syntax. Type (exit) or Ctrl+C to quit.
+Loading standard library...
+>  : Pair(Δ, Pair(Float, Pair(Δ, Δ)))
+Defined x
+>  : Pair(Stem(Δ), Stem(Δ))
+Defined id
+>  : Pair(Δ, Pair(Float, Pair(Δ, Δ)))
+Defined res
+>  : Pair(Pair(Δ, Pair(Float, Pair(Δ, Δ))), Pair(Δ, Pair(Float, Pair(Δ, Δ))))
+Defined pair
+>  : Pair(Stem(Pair(Δ, Pair(Δ, Pair(Float, Pair(Δ, Δ))))), (Pair(Δ, Pair(α10, Pair(Δ, Δ))) -> (Pair(Δ, Pair(α11, Pair(Δ, Δ))) -> Pair(Δ, Pair(α12, Pair(Δ, Δ))))))
+Defined inc
+>  : Pair(Stem(Pair(Δ, Pair(Δ, Pair(Float, Pair(Δ, Δ))))), Pair(Stem(Pair(Δ, Pair(Δ, Pair(Float, Pair(Δ, Δ))))), Δ))
+Defined bool_test
+> >  : α0
+= 10
+> >  : Pair(Δ, Pair(α13, Pair(Δ, Δ)))
+= 11.1
+> > > > > > >         Parsed 3 examples
+Learning from 3 examples (Depth 5, Epochs 1000, Library: 4)
+Starting training loop...
+Epoch 0: Loss -3.1785 GradMag 344.239207    Epoch 10: Loss -20.0832 GradMag 563.941929    Epoch 20: Loss -33.4516 GradMag 320.999982    Epoch 30: Loss -36.1293 GradMag 90.016874    Epoch 40: Loss -36.6426 GradMag 37.844482    Epoch 50: Loss -36.7950 GradMag 23.308757    Epoch 60: Loss -36.8590 GradMag 17.570167    Epoch 70: Loss -36.8942 GradMag 14.587275    Epoch 80: Loss -36.9178 GradMag 12.677691    Epoch 90: Loss -36.9359 GradMag 11.271006    Epoch 100: Loss -36.9507 GradMag 0.200436    Epoch 110: Loss -36.9632 GradMag 0.186239    Epoch 120: Loss -36.9740 GradMag 0.174490    Epoch 130: Loss -36.9834 GradMag 0.164340    Epoch 140: Loss -36.9916 GradMag 0.155374    Epoch 150: Loss -36.9990 GradMag 0.147354    Epoch 160: Loss -37.0055 GradMag 0.140119    Epoch 170: Loss -37.0113 GradMag 0.133555    Epoch 180: Loss -37.0165 GradMag 0.127568    Epoch 190: Loss -37.0212 GradMag 0.122085    Epoch 200: Loss -37.0255 GradMag 0.117043    Epoch 210: Loss -37.0293 GradMag 0.112390    Epoch 220: Loss -37.0328 GradMag 0.108083    Epoch 230: Loss -37.0360 GradMag 0.104084    Epoch 240: Loss -37.0390 GradMag 0.100360    Epoch 250: Loss -37.0416 GradMag 0.096884    Epoch 260: Loss -37.0441 GradMag 0.093631    Epoch 270: Loss -37.0464 GradMag 0.090582    Epoch 280: Loss -37.0485 GradMag 0.087717    Epoch 290: Loss -37.0504 GradMag 0.085020    Epoch 300: Loss -37.0522 GradMag 0.082477    Epoch 310: Loss -37.0539 GradMag 0.080076    Epoch 320: Loss -37.0555 GradMag 0.077805    Epoch 330: Loss -37.0569 GradMag 0.075654    Epoch 340: Loss -37.0583 GradMag 0.073615    Epoch 350: Loss -37.0595 GradMag 0.071679    Epoch 360: Loss -37.0607 GradMag 0.069838    Epoch 370: Loss -37.0618 GradMag 0.068087    Epoch 380: Loss -37.0629 GradMag 0.066419    Epoch 390: Loss -37.0639 GradMag 0.064829    Epoch 400: Loss -37.0648 GradMag 0.063312    Epoch 410: Loss -37.0656 GradMag 0.061864    Epoch 420: Loss -37.0665 GradMag 0.060480    Epoch 430: Loss -37.0672 GradMag 0.059157    Epoch 440: Loss -37.0680 GradMag 0.057891    Epoch 450: Loss -37.0701 GradMag 0.055937    Epoch 460: Loss -37.0707 GradMag 0.054821    Epoch 470: Loss -37.0712 GradMag 0.053754    Epoch 480: Loss -37.0717 GradMag 0.052730    Epoch 490: Loss -37.0722 GradMag 0.051746    Epoch 500: Loss -37.0727 GradMag 0.050801    Epoch 510: Loss -37.0731 GradMag 0.049891    Epoch 520: Loss -37.0735 GradMag 0.049017    Epoch 530: Loss -37.0739 GradMag 0.048176    Epoch 540: Loss -37.0743 GradMag 0.047366    Epoch 550: Loss -37.0747 GradMag 0.046587    Epoch 560: Loss -37.0750 GradMag 0.045837    Epoch 570: Loss -37.0753 GradMag 0.045115    Epoch 580: Loss -37.0757 GradMag 0.044419    Epoch 590: Loss -37.0760 GradMag 0.043750    Epoch 600: Loss -37.0763 GradMag 0.043105    Epoch 610: Loss -37.0765 GradMag 0.042485    Epoch 620: Loss -37.0768 GradMag 0.041887    Epoch 630: Loss -37.0771 GradMag 0.041312    Epoch 640: Loss -37.0773 GradMag 0.040758    Epoch 650: Loss -37.0776 GradMag 0.040225    Epoch 660: Loss -37.0778 GradMag 0.039712    Epoch 670: Loss -37.0780 GradMag 0.039218    Epoch 680: Loss -37.0782 GradMag 0.038744    Epoch 690: Loss -37.0784 GradMag 0.038288    Epoch 700: Loss -37.0786 GradMag 0.037849    Epoch 710: Loss -37.0788 GradMag 0.037429    Epoch 720: Loss -37.0790 GradMag 0.037025    Epoch 730: Loss -37.0792 GradMag 0.036638    Epoch 740: Loss -37.0794 GradMag 0.036267    Epoch 750: Loss -37.0795 GradMag 0.035912    Epoch 760: Loss -37.0797 GradMag 0.035573    Epoch 770: Loss -37.0799 GradMag 0.035250    Epoch 780: Loss -37.0800 GradMag 0.034942    Epoch 790: Loss -37.0801 GradMag 0.034650    Epoch 800: Loss -37.0803 GradMag 0.034372    Epoch 810: Loss -37.0804 GradMag 0.034110    Epoch 820: Loss -37.0806 GradMag 0.033862    Epoch 830: Loss -37.0807 GradMag 0.033630    Epoch 840: Loss -37.0808 GradMag 0.033413    Epoch 850: Loss -37.0809 GradMag 0.033212    Epoch 860: Loss -37.0811 GradMag 0.033026    Epoch 870: Loss -37.0812 GradMag 0.032856    Epoch 880: Loss -37.0813 GradMag 0.032703    Epoch 890: Loss -37.0814 GradMag 0.032566    Epoch 900: Loss -37.0815 GradMag 0.032446    Epoch 910: Loss -37.0816 GradMag 0.032344    Epoch 920: Loss -37.0817 GradMag 0.032261    Epoch 930: Loss -37.0818 GradMag 0.032197    Epoch 940: Loss -37.0819 GradMag 0.032152    Epoch 950: Loss -37.0820 GradMag 0.032129    Epoch 960: Loss -37.0821 GradMag 0.032129    Epoch 970: Loss -37.0822 GradMag 0.032152    Epoch 980: Loss -37.0823 GradMag 0.032200    Epoch 990: Loss -37.0824 GradMag 0.032275    Epoch 999: Loss -37.0825 GradMag 0.032367    
+Top Learned Programs (Distribution over 10 samples):
+  100.0% [PASS] : (n (n (n n n)) (n (n (n n n)) n))
+Learned Program (Best Score): (n (n (n n n)) (n (n (n n n)) n))
+Added learned program to curriculum library (Size: 5)
+> > >         Parsed 3 examples
+Learning from 3 examples (Depth 5, Epochs 1000, Library: 5)
+Starting training loop...
+Epoch 0: Loss 2.8660 GradMag 489.988931    Epoch 10: Loss 2.4636 GradMag 864.788877    Epoch 20: Loss 1.6878 GradMag 549.397313    Epoch 30: Loss 1.2740 GradMag 152.047695    Epoch 40: Loss 1.0752 GradMag 61.228857    Epoch 50: Loss 0.9843 GradMag 36.888559    

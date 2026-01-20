@@ -1,0 +1,34 @@
+(def x 10.0)
+(def id (fn x x))
+(def res (id 10.0))
+(def pair (cons 1.0 2.0))
+(def inc (fn x (+ x 1.0)))
+(def bool_test (fn b (if b 1.0 2.0)))
+
+(id x)
+
+(inc 10.1)
+
+
+; First, lists are built with cons: (cons head tail)
+; nil is represented as n (Leaf)
+
+; Example 3: Learn "first" function (returns head of list)
+(learn-from (
+  ((cons 1.0 (cons 2.0 n)) 1.0)
+  ((cons 3.0 (cons 4.0 n)) 3.0)
+  ((cons (cons 1.0 2.0) 3.0) (cons 1.0 2.0))
+) 1000 5 10)
+
+; Example 4: Learn "rest" function (returns tail of list)
+(learn-from (
+  ((cons 1.0 (cons 2.0 n)) (cons 2.0 n))
+  ((cons 3.0 (cons 4.0 n)) (cons 4.0 n))
+  ((cons 1.0 n) n)
+) 1000 5 10)
+
+; Example 5: Learn list reversal (Depth 10 with curriculum)
+(learn-from (
+  ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
+  ((cons 3.0 (cons 4.0 n)) (cons 4.0 (cons 3.0 n)))
+) 2000 10 10)
