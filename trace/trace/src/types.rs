@@ -18,6 +18,10 @@ pub enum Type {
     Bool,              // Constrained Union: Leaf | Stem(Leaf)
     Str,               // String (TagStr)
     Char,              // Char (TagChar)
+    
+    // Explicit Polymorphism
+    Forall(String, Box<Type>), // ∀X. T
+    Generic(String),           // X (bound by Forall)
 }
 
 impl fmt::Debug for Type {
@@ -43,6 +47,8 @@ impl fmt::Debug for Type {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Char => write!(f, "Char"),
+            Type::Forall(var, body) => write!(f, "∀{}.{:?}", var, body),
+            Type::Generic(name) => write!(f, "{}", name),
             _ => write!(f, "?"), // Intersection not fully supported in display yet
         }
     }

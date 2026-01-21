@@ -17,18 +17,18 @@
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) 1.0)
   ((cons 3.0 (cons 4.0 n)) 3.0)
-  ((cons (cons 1.0 2.0) 3.0) (cons 1.0 2.0))
-) 1000 5 10)
+  ((cons (cons 1.0 (cons 2.0 n)) 3.0) (cons 1.0 (cons 2.0 n)))
+) 1000)
 
 ; Example 4: Learn "rest" function (returns tail of list)
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 n))
   ((cons 3.0 (cons 4.0 n)) (cons 4.0 n))
   ((cons 1.0 n) n)
-) 1000 5 10)
+) 1000)
 
-; Example 5: Learn list reversal (Depth 10 with curriculum)
+; Example 5: Learn list reversal
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
   ((cons 3.0 (cons 4.0 n)) (cons 4.0 (cons 3.0 n)))
-) 2000 10 10)
+) 2000)

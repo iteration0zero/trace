@@ -582,6 +582,87 @@ fn apply_primitive(g: &mut Graph, p: Primitive, args: &SmallVec<[NodeId; 2]>) ->
                  }
             }
         }
+        
+        Primitive::I => {
+            if args.is_empty() { return None; }
+            let res = args[0];
+            if args.len() > 1 {
+                 let rest = args[1..].iter().cloned().collect();
+                 Some(g.add(Node::App { func: res, args: rest }))
+            } else {
+                Some(res)
+            }
+        }
+        Primitive::K => {
+            if args.len() < 2 { return None; }
+            let res = args[0];
+            if args.len() > 2 {
+                 let rest = args[2..].iter().cloned().collect();
+                 Some(g.add(Node::App { func: res, args: rest }))
+            } else {
+                Some(res)
+            }
+        }
+        Primitive::S => {
+            if args.len() < 3 { return None; }
+            let x = args[0];
+            let y = args[1];
+            let z = args[2];
+            
+            // x z
+            let xz = g.add(Node::App { func: x, args: smallvec::smallvec![z] });
+            // y z
+            let yz = g.add(Node::App { func: y, args: smallvec::smallvec![z] });
+            // (x z) (y z)
+            let res = g.add(Node::App { func: xz, args: smallvec::smallvec![yz] });
+            
+            if args.len() > 3 {
+                 let rest = args[3..].iter().cloned().collect();
+                 Some(g.add(Node::App { func: res, args: rest }))
+            } else {
+                Some(res)
+            }
+        }
+
+        Primitive::First => {
+             if args.is_empty() { return None; }
+             let arg = reduce_whnf(g, args[0]); // Reduce argument to see struct
+             
+             match g.get(arg).clone() {
+                 Node::Fork(head, _) => {
+                     // check if header is a tag primitive (Atom)
+                     if let Node::Prim(p) = g.get(head) {
+                         if matches!(p, Primitive::TagInt | Primitive::TagFloat | Primitive::TagStr | Primitive::TagChar) {
+                             // It's an Atom (e.g. String). First fails.
+                             return Some(g.add(Node::Leaf)); // Fail type
+                         }
+                     }
+                     // It's a List. Return head.
+                     Some(head)
+                 },
+                 _ => Some(g.add(Node::Leaf)), // Fail on non-fork
+             }
+        }
+        Primitive::Rest => {
+             if args.is_empty() { return None; }
+             let arg = reduce_whnf(g, args[0]);
+             
+             match g.get(arg).clone() {
+                 Node::Fork(head, tail) => {
+                     if let Node::Prim(p) = g.get(head) {
+                         if matches!(p, Primitive::TagInt | Primitive::TagFloat | Primitive::TagStr | Primitive::TagChar) {
+                             return Some(g.add(Node::Leaf)); // Fail type
+                         }
+                     }
+                     // It's a List. Return tail.
+                     Some(tail)
+                 },
+                 _ => Some(g.add(Node::Leaf)), 
+             }
+        }
+
+
+
         _ => None,
     }
 }

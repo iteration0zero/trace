@@ -1,4 +1,4 @@
-use crate::arena::{Graph, Node, NodeId};
+use crate::arena::{Graph, Node, NodeId, Primitive};
 use smallvec::SmallVec;
 
 #[derive(Debug, Clone)]
@@ -18,18 +18,11 @@ enum BExpr {
 }
 
 fn k_node(g: &mut Graph) -> NodeId {
-    let n = g.add(Node::Leaf);
-    g.add(Node::App { func: n, args: smallvec::smallvec![n] })
+    g.add(Node::Prim(Primitive::K))
 }
 
 fn s_node(g: &mut Graph) -> NodeId {
-    // S = S1{K △} △ where S1{p} = △(△ p)
-    let n = g.add(Node::Leaf);
-    let k = k_node(g);
-    let k_n = g.add(Node::App { func: k, args: smallvec::smallvec![n] });
-    let n_kn = g.add(Node::App { func: n, args: smallvec::smallvec![k_n] });
-    let s1 = g.add(Node::App { func: n, args: smallvec::smallvec![n_kn] });
-    g.add(Node::App { func: s1, args: smallvec::smallvec![n] })
+    g.add(Node::Prim(Primitive::S))
 }
 
 fn bexpr_k(g: &mut Graph, u: BExpr) -> BExpr {
@@ -44,11 +37,7 @@ fn bexpr_s(g: &mut Graph, u: BExpr, v: BExpr) -> BExpr {
 }
 
 fn bexpr_i(g: &mut Graph) -> BExpr {
-    // I = S K K
-    let s_const = BExpr::Const(s_node(g));
-    let k_const = BExpr::Const(k_node(g));
-    let sk = BExpr::App(Box::new(s_const), Box::new(k_const.clone()));
-    BExpr::App(Box::new(sk), Box::new(k_const))
+    BExpr::Const(g.add(Node::Prim(Primitive::I)))
 }
 
 fn bexpr_occurs(name: &str, e: &BExpr) -> bool {

@@ -97,6 +97,10 @@ impl<'a> Parser<'a> {
     fn consume(&mut self) -> Option<Token> {
         if let Some(t) = self.undo.take() { Some(t) } else { self.lexer.next_token() }
     }
+    
+    pub fn has_more(&mut self) -> bool {
+        self.peek().is_some()
+    }
 
     pub fn parse_toplevel(&mut self, g: &mut Graph, env: Option<&HashMap<String, NodeId>>) -> Result<ParseResult, String> {
          // Check for (def ...)
@@ -181,6 +185,8 @@ impl<'a> Parser<'a> {
         Ok(head)
     }
 
+
+
     fn parse_expr(&mut self, g: &mut Graph, env: Option<&HashMap<String, NodeId>>, bound: &[String]) -> Result<CompileTerm, String> {
         match self.consume() {
             // ... (existing implementation) ...
@@ -191,15 +197,15 @@ impl<'a> Parser<'a> {
                 if s == "n" {
                     return Ok(CompileTerm::Const(g.add(Node::Leaf)));
                 }
+                if let Ok(i) = s.parse::<BigInt>() {
+                    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                        let raw = encode_int(g, &i);
+                        let tagged = crate::engine::make_tag(g, Primitive::TagInt, raw);
+                        return Ok(CompileTerm::Const(tagged));
+                    }
+                }
+
                 if let Ok(f) = s.parse::<f64>() {
-                     // Try parsing as int logic
-                     if let Ok(i) = s.parse::<BigInt>() {
-                          if !s.contains('.') && !s.contains('e') {
-                               let raw = encode_int(g, &i);
-                               let tagged = crate::engine::make_tag(g, Primitive::TagInt, raw);
-                               return Ok(CompileTerm::Const(tagged));
-                          }
-                     }
                     let raw = g.add(Node::Float(f));
                     let tagged = crate::engine::make_tag(g, Primitive::TagFloat, raw);
                     return Ok(CompileTerm::Const(tagged));
@@ -218,6 +224,8 @@ impl<'a> Parser<'a> {
                     "/" => Some(Primitive::Div),
                     "if" => Some(Primitive::If),
                     "trace" => Some(Primitive::Trace),
+                    "first" => Some(Primitive::First),
+                    "rest" => Some(Primitive::Rest),
                     _ => None,
                 };
                 if let Some(p) = prim {

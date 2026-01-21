@@ -68,6 +68,8 @@ impl Hash for Node {
 pub enum Primitive {
     Add, Sub, Mul, Div,
     Eq, Gt, Lt, If,
+    S, K, I,
+    First, Rest,
     Trace,
     TagInt, TagFloat, TagStr, TagChar,
     TypeOf, Any, Match, Mod,

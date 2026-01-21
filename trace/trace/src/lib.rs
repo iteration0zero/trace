@@ -11,6 +11,5 @@ pub mod quantum;
 pub mod diff;
 pub mod learner_helper;
 pub mod learner;
-pub mod soft;
 
 

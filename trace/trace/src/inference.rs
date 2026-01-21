@@ -24,6 +24,63 @@ pub struct InferenceEngine {
 }
 
 impl InferenceEngine {
+    fn subst_generic(ty: &Type, name: &str, replacement: &Type) -> Type {
+        match ty {
+            Type::Generic(n) if n == name => replacement.clone(),
+            Type::Forall(n, body) => {
+                if n == name {
+                    Type::Forall(n.clone(), body.clone())
+                } else {
+                    Type::Forall(n.clone(), Box::new(Self::subst_generic(body, name, replacement)))
+                }
+            }
+            Type::Arrow(a, b) => Type::Arrow(
+                Box::new(Self::subst_generic(a, name, replacement)),
+                Box::new(Self::subst_generic(b, name, replacement))
+            ),
+            Type::Stem(a) => Type::Stem(Box::new(Self::subst_generic(a, name, replacement))),
+            Type::Pair(a, b) => Type::Pair(
+                Box::new(Self::subst_generic(a, name, replacement)),
+                Box::new(Self::subst_generic(b, name, replacement))
+            ),
+            Type::Union(ts) => Type::Union(ts.iter().map(|t| Self::subst_generic(t, name, replacement)).collect()),
+            Type::Rec(_id, body) => Type::Rec(*_id, Box::new(Self::subst_generic(body, name, replacement))),
+            _ => ty.clone(),
+        }
+    }
+
+    fn subst_rec(ty: &Type, id: usize, replacement: &Type) -> Type {
+        match ty {
+            Type::RecVar(i) if *i == id => replacement.clone(),
+            Type::Rec(i, body) => {
+                // If nested Rec shadows ID, stop.
+                if *i == id {
+                    Type::Rec(*i, body.clone())
+                } else {
+                    Type::Rec(*i, Box::new(Self::subst_rec(body, id, replacement)))
+                }
+            }
+            Type::Arrow(a, b) => Type::Arrow(
+                Box::new(Self::subst_rec(a, id, replacement)),
+                Box::new(Self::subst_rec(b, id, replacement))
+            ),
+            Type::Stem(a) => Type::Stem(Box::new(Self::subst_rec(a, id, replacement))),
+            Type::Pair(a, b) => Type::Pair(
+                Box::new(Self::subst_rec(a, id, replacement)),
+                Box::new(Self::subst_rec(b, id, replacement))
+            ),
+            Type::Union(ts) => Type::Union(ts.iter().map(|t| Self::subst_rec(t, id, replacement)).collect()),
+            Type::Forall(n, body) => Type::Forall(n.clone(), Box::new(Self::subst_rec(body, id, replacement))),
+            _ => ty.clone(),
+        }
+    }
+
+    pub fn fresh_skolem(&mut self, name: &str) -> Type {
+        let id = self.next_var_id;
+        self.next_var_id += 1;
+        Type::Generic(format!("{}#{}", name, id))
+    }
+
     pub fn new() -> Self {
         Self {
             next_var_id: 0,
@@ -182,18 +239,48 @@ impl InferenceEngine {
                     }
                 }
             }
-        }
+            }
+
         Ok(())
     }
     
-    // Coinductive Subtyping (Algorithm 3.4.2)
-    fn is_subtype(&mut self, t1: Type, t2: Type, visited: &mut std::collections::HashSet<(Type, Type)>) -> bool {
+    // Coinductive Subtyping (Algorithm 3.4.2) with support for Forall and Rec
+    pub fn is_subtype(&mut self, t1: Type, t2: Type, visited: &mut std::collections::HashSet<(Type, Type)>) -> bool {
          if t1 == t2 { return true; }
          if visited.contains(&(t1.clone(), t2.clone())) { return true; } // Cycle detection
          visited.insert((t1.clone(), t2.clone()));
          
          match (t1, t2) {
              (Type::Leaf, Type::Leaf) => true,
+             
+             // Rec Unfolding
+             (Type::Rec(id, body), t2) => {
+                 let rec_ty = Type::Rec(id, body.clone());
+                 let unrolled = Self::subst_rec(&body, id, &rec_ty);
+                 self.is_subtype(unrolled, t2, visited)
+             },
+             (t1, Type::Rec(id, body)) => {
+                 // Unrolling right:
+                 let rec_ty = Type::Rec(id, body.clone());
+                 let unrolled = Self::subst_rec(&body, id, &rec_ty);
+                 self.is_subtype(t1, unrolled, visited)
+             },
+             
+             // Forall Instantiation (Left)
+             // ∀X. T <= U  if  T[alpha/X] <= U  (where alpha is fresh existential/unification var)
+             (Type::Forall(name, body), t2) => {
+                 let alpha = self.fresh_var();
+                 let instantiated = Self::subst_generic(&body, &name, &alpha);
+                 self.is_subtype(instantiated, t2, visited)
+             },
+             
+             // Forall Generalization (Right)
+             // U <= ∀X. T  if  U <= T[skolem/X] (where skolem is fresh constant)
+             (t1, Type::Forall(name, body)) => {
+                 let skolem = self.fresh_skolem(&name);
+                 let instantiated = Self::subst_generic(&body, &name, &skolem);
+                 self.is_subtype(t1, instantiated, visited)
+             },
              
              // Union Right: T1 <= A | B if T1 <= A OR T1 <= B
              (t1, Type::Union(ts)) => {
@@ -240,6 +327,7 @@ impl InferenceEngine {
                      Err(_) => false,
                  }
              },
+             (Type::Generic(a), Type::Generic(b)) => a == b,
 
              // Arrow Contravariance: A1->R1 <= A2->R2 if A2 <= A1 AND R1 <= R2
              (Type::Arrow(a1, r1), Type::Arrow(a2, r2)) => {
@@ -348,6 +436,7 @@ impl InferenceEngine {
             Type::Pair(a, b) => Type::Pair(Box::new(self.resolve_type(*a)), Box::new(self.resolve_type(*b))),
             Type::Union(ts) => Type::Union(ts.into_iter().map(|t| self.resolve_type(t)).collect()),
             Type::Rec(id, body) => Type::Rec(id, Box::new(self.resolve_type(*body))),
+            Type::Forall(name, body) => Type::Forall(name, Box::new(self.resolve_type(*body))),
             _ => ty,
         }
     }
@@ -407,6 +496,7 @@ impl InferenceEngine {
             Type::Pair(a, b) => self.occurs_in(var, a) || self.occurs_in(var, b),
             Type::Union(ts) => ts.iter().any(|t| self.occurs_in(var, t)),
             Type::Rec(_, body) => self.occurs_in(var, body),
+            Type::Forall(_, body) => self.occurs_in(var, body),
             _ => false,
         }
     }
@@ -443,6 +533,7 @@ impl InferenceEngine {
                 Box::new(Self::subst_ty(a, var, replacement)),
                 Box::new(Self::subst_ty(b, var, replacement))
             ),
+            Type::Forall(n, body) => Type::Forall(n.clone(), Box::new(Self::subst_ty(body, var, replacement))),
             _ => ty.clone(),
         }
     }
@@ -473,12 +564,68 @@ impl InferenceEngine {
             Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Div => {
                 let n1 = self.get_number_type();
                 let n2 = self.get_number_type();
-                let n3 = self.get_number_type(); // Result is also Number
+                let n3 = self.get_number_type();
                 
                 Type::Arrow(
                     Box::new(n1),
                     Box::new(Type::Arrow(Box::new(n2), Box::new(n3)))
                 )
+            }
+            Primitive::I => {
+                let a = "A".to_string();
+                let var_a = Type::Generic(a.clone());
+                // I: ∀A. A -> A
+                Type::Forall(a, Box::new(Type::Arrow(Box::new(var_a.clone()), Box::new(var_a))))
+            }
+            Primitive::K => {
+                let a = "A".to_string();
+                let b = "B".to_string();
+                let var_a = Type::Generic(a.clone());
+                let var_b = Type::Generic(b.clone());
+                // K: ∀A.∀B. A -> B -> A
+                Type::Forall(a, Box::new(Type::Forall(b, Box::new(
+                    Type::Arrow(Box::new(var_a.clone()), Box::new(Type::Arrow(Box::new(var_b), Box::new(var_a))))
+                ))))
+            }
+            Primitive::S => {
+                let a = "A".to_string();
+                let b = "B".to_string();
+                let c = "C".to_string();
+                let var_a = Type::Generic(a.clone());
+                let var_b = Type::Generic(b.clone());
+                let var_c = Type::Generic(c.clone());
+                
+                // S: ∀A.∀B.∀C. (A->B->C) -> (A->B) -> A->C
+                // A->B->C
+                let abc = Type::Arrow(Box::new(var_a.clone()), Box::new(Type::Arrow(Box::new(var_b.clone()), Box::new(var_c.clone()))));
+                // A->B
+                let ab = Type::Arrow(Box::new(var_a.clone()), Box::new(var_b));
+                // A->C
+                let ac = Type::Arrow(Box::new(var_a), Box::new(var_c));
+                
+                Type::Forall(a, Box::new(Type::Forall(b, Box::new(Type::Forall(c, Box::new(
+                    Type::Arrow(Box::new(abc), Box::new(Type::Arrow(Box::new(ab), Box::new(ac))))
+                ))))))
+            }
+            Primitive::First => {
+                let a = "A".to_string();
+                let b = "B".to_string();
+                let var_a = Type::Generic(a.clone());
+                let var_b = Type::Generic(b.clone());
+                // First: ∀A.∀B. Pair(A, B) -> A
+                Type::Forall(a, Box::new(Type::Forall(b, Box::new(
+                   Type::Arrow(Box::new(Type::Pair(Box::new(var_a.clone()), Box::new(var_b))), Box::new(var_a))
+                ))))
+            }
+            Primitive::Rest => {
+               let a = "A".to_string();
+               let b = "B".to_string();
+               let var_a = Type::Generic(a.clone());
+               let var_b = Type::Generic(b.clone());
+               // Rest: ∀A.∀B. Pair(A, B) -> B
+               Type::Forall(a, Box::new(Type::Forall(b, Box::new(
+                  Type::Arrow(Box::new(Type::Pair(Box::new(var_a), Box::new(var_b.clone()))), Box::new(var_b))
+               ))))
             }
             _ => Type::Leaf, 
         }
@@ -508,6 +655,7 @@ impl InferenceEngine {
                 
                 (Type::Union(stems), Type::Union(lefts), Type::Union(rights))
             },
+            Type::Forall(_, body) => Self::propagate_type_constraints(body),
              _ => (any(), any(), any())
         }
     }
@@ -527,7 +675,7 @@ impl InferenceEngine {
                  mask
             },
             Type::Bool => [0.0, 0.0, -f64::INFINITY], 
-            Type::Rec(_, _) | Type::Var(_) | Type::RecVar(_) => [0.0, 0.0, 0.0],
+            Type::Rec(_, _) | Type::Var(_) | Type::RecVar(_) | Type::Forall(_, _) | Type::Generic(_) => [0.0, 0.0, 0.0],
             _ => [0.0, 0.0, 0.0]
         }
     }

@@ -1,13 +1,14 @@
-use trace::arena::{Graph, NodeId};
+use trace::arena::{Graph, NodeId, Node, Primitive};
 use trace::parser::{Parser, ParseResult};
 use trace::engine::{reduce, unparse, EvalContext};
 use std::collections::HashMap;
 use std::io::{self, Write};
+use num_traits::ToPrimitive;
 
 use trace::inference::InferenceEngine;
 use trace::types::{TypeEnv, Type};
 
-use trace::learner::{learn, learn_from_examples, learn_from_examples_with_library, LearnerConfig};
+use trace::learner::{evolve, SearchConfig};
 
 fn main() {
     println!("Trace REPL");
@@ -28,8 +29,7 @@ fn main() {
         ("is-leaf", "(fn z ((triage true (fn u false) (fn u (fn v false))) z))"),
         ("is-stem", "(fn z ((triage false (fn u true) (fn u (fn v false))) z))"),
         ("is-fork", "(fn z ((triage false (fn u false) (fn u (fn v true))) z))"),
-        ("first", "(fn p ((triage n (fn u n) (fn a (fn b a))) p))"),
-        ("rest", "(fn p ((triage n (fn u n) (fn a (fn b b))) p))"),
+        // first/rest are now primitives
         ("stem", "(fn x (n x))"),
         ("fork", "(fn a (fn b (n a b)))"),
         ("cons", "fork"),
@@ -120,15 +120,12 @@ fn main() {
             continue;
         }
         
-        // Handle (learn ...) and (learn-from ...) commands
-        if trimmed.starts_with("(learn ") || trimmed.starts_with("(learn-from ") {
-            if let Some(learned) = handle_learn_command(trimmed, &mut g, &env, &type_env, &library) {
-                 // If a new program was learned, add it to the library
-                 println!("Added learned program to curriculum library (Size: {})", library.len() + 1);
-                 library.push(learned);
-            }
-            continue;
+        // Handle (learn-from ...)
+        if trimmed.starts_with("(learn-from") {
+             handle_learn_from_command(trimmed, &mut g, &mut env);
+             continue;
         }
+
 
         let mut parser = Parser::new(&input);
         match parser.parse_toplevel(&mut g, Some(&env)) {
@@ -171,243 +168,139 @@ fn main() {
     }
 }
 
-/// Handle learn command: (learn fn epochs) or (learn-from ((in1 out1) ...) [type] epochs)
-/// Returns learned program NodeId if successful
-fn handle_learn_command(
+
+
+/// Handle learn-from command: (learn-from [epochs] ((in out) ...))
+fn handle_learn_from_command(
     input: &str, 
     g: &mut Graph, 
-    env: &HashMap<String, NodeId>,
-    type_env: &TypeEnv,
-    library: &Vec<NodeId>
-) -> Option<NodeId> {
-    // Check for learn-from syntax
-    if input.starts_with("(learn-from ") {
-        return handle_learn_from_command(input, g, env, type_env, library);
-    }
+    env: &mut HashMap<String, NodeId>
+) {
+    let inner = input.trim_start_matches("(learn-from").trim_end_matches(')').trim();
     
-    // Parse: (learn name epochs [depth] [samples])
-    // Example: (learn id 500) or (learn id 500 3 10)
-    let inner = input.trim_start_matches("(learn ").trim_end_matches(')').trim();
-    let parts: Vec<&str> = inner.split_whitespace().collect();
-    
-    if parts.is_empty() {
-        println!("Usage: (learn <name> [epochs] [depth] [samples])");
-        println!("       (learn id 500)");
-        println!("       (learn id 500 3 10)  ; depth 3, 10 samples/step");
-        println!("       (learn-from ((in out) ...) [type])");
-        return None;
-    }
-    
-    let name = parts[0];
-    let epochs: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(500);
-    let depth: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
-    let samples: usize = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
-    
-    if let Some(&target_func) = env.get(name) {
-        // Get type constraint from type_env if available
-        let target_type = type_env.vars.get(name).cloned();
-        
-        let config = LearnerConfig {
-            epochs,
-            skeleton_depth: depth,
-            samples_per_step: samples,
-            ..Default::default()
-        };
+    // Parse: Count and Examples (Auto-detected via type)
 
-        // Filter library to exclude the target function itself (to prevent trivial solution)
-        let filtered_library: Vec<NodeId> = library.iter()
-            .cloned()
-            .filter(|&id| id != target_func)
-            .collect();
-
-        learn(g, target_func, target_type, config, filtered_library)
-    } else {
-        println!("Error: '{}' not defined. Define a function first with (def {} ...)", name, name);
-        None
-    }
-}
-
-/// Handle learn-from: (learn-from ((in1 out1) (in2 out2) ...) [epochs] [depth])
-/// Returns learned program NodeId if successful
-fn handle_learn_from_command(
-    input: &str,
-    g: &mut Graph,
-    env: &HashMap<String, NodeId>,
-    _type_env: &TypeEnv,
-    library: &Vec<NodeId>
-) -> Option<NodeId> {
-    // Parse examples from input
-    // Format: (learn-from ((in1 out1) (in2 out2) ...) [epochs] [depth])
-    let inner = input.trim_start_matches("(learn-from ").trim_end_matches(')').trim();
+    // Robust Parsing using Parser loop
+    let mut p = Parser::new(inner);
+    let mut terms = Vec::new();
     
-    // Find the examples list (starts with '((' and ends with '))')
-    if !inner.starts_with('(') {
-        println!("Usage: (learn-from ((in1 out1) (in2 out2) ...) [epochs] [depth])");
-        return None;
-    }
-    
-    // Find matching closing paren for examples list
-    let mut depth = 0;
-    let mut examples_end = 0;
-    for (i, c) in inner.chars().enumerate() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    examples_end = i + 1;
-                    break;
-                }
-            }
-            _ => {}
+    // Parse all terms in inner
+    while p.has_more() {
+        if let Ok(ParseResult::Term(node)) = p.parse_toplevel(g, Some(env)) {
+             terms.push(node);
+        } else {
+             break;
         }
     }
     
-    if examples_end == 0 {
-        println!("Error: Malformed examples list");
-        return None;
-    }
+    let mut epochs = 100;
+    let mut examples_raw = None;
     
-    let examples_str = &inner[..examples_end];
-    let rest = inner[examples_end..].trim();
-    let rest_parts: Vec<&str> = rest.split_whitespace().collect();
-    
-    let epochs: usize = rest_parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(500);
-    let skeleton_depth: usize = rest_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
-    let samples: usize = rest_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
-    
-    // Parse examples
-    let mut train_data: Vec<(NodeId, NodeId)> = Vec::new();
-    
-    // examples_str is like "((in1 out1) (in2 out2) ...)" 
-    // Strip one layer of outer parens to get "(in1 out1) (in2 out2) ..."
-    let examples_inner = examples_str.trim();
-    if examples_inner.starts_with('(') && examples_inner.ends_with(')') {
-        let inner = &examples_inner[1..examples_inner.len()-1];
-        train_data = parse_pairs(inner.trim(), g, env);
-    }
-    
-    if train_data.is_empty() {
-        // Debug: print what we're trying to parse
-        eprintln!("DEBUG: examples_str = '{}'", examples_str);
-    }
-    
-    if train_data.is_empty() {
-        println!("Error: No valid examples found");
-        return None;
-    }
-    
-    println!("Parsed {} examples", train_data.len());
-    
-    let config = LearnerConfig {
-        epochs,
-        skeleton_depth,
-        samples_per_step: samples,
-        ..Default::default()
-    };
-    
-    learn_from_examples_with_library(g, train_data, None, config, library.clone())
-}
-
-/// Parse pairs like (in1 out1) (in2 out2) from a string
-fn parse_pairs(input: &str, g: &mut Graph, env: &HashMap<String, NodeId>) -> Vec<(NodeId, NodeId)> {
-    let mut pairs = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    
-    for (i, c) in input.chars().enumerate() {
-        match c {
-            '(' => {
-                if depth == 0 { start = i; }
-                depth += 1;
-            }
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    let pair_str = &input[start..=i];
-                    if let Some((inp, out)) = parse_single_pair(pair_str, g, env) {
-                        pairs.push((inp, out));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    
-    pairs
-}
-
-/// Parse a single (in out) pair - handles nested parentheses correctly
-fn parse_single_pair(input: &str, g: &mut Graph, env: &HashMap<String, NodeId>) -> Option<(NodeId, NodeId)> {
-    let trimmed = input.trim();
-    // Only strip one layer of parens: "(expr1 expr2)" -> "expr1 expr2"
-    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-        return None;
-    }
-    let inner = &trimmed[1..trimmed.len()-1];
-    
-    // Find the boundary between input and output expressions
-    // They are separated by whitespace, but we need to respect parentheses
-    let mut depth = 0;
-    let mut split_pos = None;
-    let mut in_whitespace = false;
-    
-    for (i, c) in inner.chars().enumerate() {
-        match c {
-            '(' => {
-                depth += 1;
-                in_whitespace = false;
-            },
-            ')' => {
-                depth -= 1;
-                in_whitespace = false;
-            },
-            c if c.is_whitespace() => {
-                if depth == 0 && !in_whitespace {
-                    split_pos = Some(i);
-                    in_whitespace = true;
+    for term in terms {
+        let mut ctx = EvalContext::default();
+        let val = reduce(g, term, &mut ctx);
+        match g.get(g.resolve(val)).clone() {
+            Node::Prim(Primitive::TagInt) => {
+                if let Some(bi) = trace::engine::decode_int(g, val) {
+                     if let Some(n) = bi.to_usize() { epochs = n; }
                 }
             },
             _ => {
-                in_whitespace = false;
-                // For atoms at depth 0, the next whitespace is the split
-                if depth == 0 && split_pos.is_some() {
-                    break;
-                }
+                // Assume structure is the examples list
+                // It might not be reduced to List logic, but Application logic
+                examples_raw = Some(term); // Use unreduced term to preserve App structure?
+                // reduce() evaluates (cons a b) to Fork.
+                // But ( (a b) (c d) ) reduces to... application?
+                // If I use unreduced 'term', I can flatten Apps.
             }
         }
-        // If we found a split and we're starting a new expression, we're done
-        if split_pos.is_some() && depth == 0 && !c.is_whitespace() {
-            break;
+    }
+    
+    let raw_list = if let Some(n) = examples_raw { n } else {
+        println!("Error: No examples found.");
+        return;
+    };
+    
+    // Flatten App chain: (a b c) -> App(App(a,b),c)
+    // We want [a, b, c]
+    fn flatten_apps(g: &Graph, node: NodeId, acc: &mut Vec<NodeId>) {
+        // Resolve? App is structural.
+        match g.get(node).clone() {
+            Node::App { func, args } => {
+                // Triage App has vec of args. App(f, [a1, a2]) -> f a1 a2
+                // Flatten f, then add args.
+                flatten_apps(g, func, acc);
+                for arg in args {
+                    acc.push(arg);
+                }
+            },
+            _ => acc.push(node)
         }
     }
     
-    let split_pos = split_pos?;
-    let inp_str = inner[..split_pos].trim();
-    let out_str = inner[split_pos..].trim();
+    let mut items = Vec::new();
+    flatten_apps(g, raw_list, &mut items);
     
-    if inp_str.is_empty() || out_str.is_empty() {
-        return None;
+    let mut examples = Vec::new();
+    let mut ctx = EvalContext::default();
+    
+    for item in items {
+        // Each item is an Example Pair (in out).
+        // Parsed as App(in, out)
+        // Check structural App
+        match g.get(item).clone() {
+            Node::App { func, args } => {
+                if args.len() == 1 {
+                     // App(in, out)
+                     let input = func;
+                     let output = args[0];
+                     
+                     // We should REDUCE them now to get Values
+                     let in_val = reduce(g, input, &mut ctx);
+                     let out_val = reduce(g, output, &mut ctx);
+                     examples.push((in_val, out_val));
+                } else {
+                    println!("Error: Malformed example pair (multi-args): {:?}", g.get(item));
+                }
+            },
+            // Maybe it reduced to Fork if valid cons?
+            Node::Fork(cur_in, cur_tail) => {
+                 // Handle list-style (cons in (cons out n)) if user used cons
+                 // But (learn-from ( (a b) )) uses parens, likely App.
+                 // This branch is fallback.
+                 let out_node = match g.get(g.resolve(cur_tail)).clone() {
+                     Node::Fork(out, _) => out,
+                     _ => cur_tail
+                 };
+                 examples.push((cur_in, out_node));
+            }
+            _ => {
+                println!("Error: Example item is not a pair (App or Fork). Got {:?}", g.get(item));
+            }
+        }
     }
     
-    let mut p1 = Parser::new(inp_str);
-    let mut p2 = Parser::new(out_str);
+    if examples.is_empty() {
+        println!("Error: Empty examples list.");
+        return;
+    }
+
+    println!("Parsed {} examples. Evolving for {} epochs...", examples.len(), epochs);
     
-    let inp = match p1.parse_toplevel(g, Some(env)) {
-        Ok(ParseResult::Term(n)) => n,
-        _ => return None,
+    let config = SearchConfig {
+        max_epochs: epochs,
+        max_depth: 3, 
+        lr: 0.1,
     };
     
-    let out = match p2.parse_toplevel(g, Some(env)) {
-        Ok(ParseResult::Term(n)) => n,
-        _ => return None,
-    };
-    
-    // Reduce both to get canonical form
-    use trace::engine::{reduce, EvalContext};
-    let mut ctx = EvalContext::default();
-    let inp_reduced = reduce(g, inp, &mut ctx);
-    let out_reduced = reduce(g, out, &mut ctx);
-    
-    Some((inp_reduced, out_reduced))
+    if let Some(gene) = evolve(g, &examples, config) {
+        println!("Success! Learned Gene: {:?}", gene);
+        let learned_node = gene.compile(g); 
+        println!("Compiled Node: {}", unparse(g, learned_node));
+        
+        env.insert("learned".to_string(), learned_node);
+        println!("Saved as 'learned'.");
+    } else {
+        println!("Evolution failed to converge.");
+    }
 }
