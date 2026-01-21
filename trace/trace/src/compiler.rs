@@ -17,40 +17,38 @@ enum BExpr {
     App(Box<BExpr>, Box<BExpr>),
 }
 
-fn bexpr_k(g: &mut Graph, u: BExpr) -> BExpr {
-    // K = (n n)
+fn k_node(g: &mut Graph) -> NodeId {
     let n = g.add(Node::Leaf);
-    // K = Stem(n).
-    let k_node = g.add(Node::Stem(n)); 
-    let k_const = BExpr::Const(k_node);
+    g.add(Node::App { func: n, args: smallvec::smallvec![n] })
+}
+
+fn s_node(g: &mut Graph) -> NodeId {
+    // S = S1{K △} △ where S1{p} = △(△ p)
+    let n = g.add(Node::Leaf);
+    let k = k_node(g);
+    let k_n = g.add(Node::App { func: k, args: smallvec::smallvec![n] });
+    let n_kn = g.add(Node::App { func: n, args: smallvec::smallvec![k_n] });
+    let s1 = g.add(Node::App { func: n, args: smallvec::smallvec![n_kn] });
+    g.add(Node::App { func: s1, args: smallvec::smallvec![n] })
+}
+
+fn bexpr_k(g: &mut Graph, u: BExpr) -> BExpr {
+    let k_const = BExpr::Const(k_node(g));
     BExpr::App(Box::new(k_const), Box::new(u))
 }
 
 fn bexpr_s(g: &mut Graph, u: BExpr, v: BExpr) -> BExpr {
-    // Canonical S x z = Leaf (Leaf x z)
-    // Corresponds to Stem(Fork(x, z))
-    // We construct (n (n u v))
-    // (n u v) -> Fork(u, v) (via Stem fallback)
-    // (n Fork(u, v)) -> Stem(Fork(u, v)) -> S u v
-    
-    let n = g.add(Node::Leaf);
-    let n_const = BExpr::Const(n);
-    
-    // (n u)
-    let nu = BExpr::App(Box::new(n_const.clone()), Box::new(u));
-    // (n u v)
-    let nuv = BExpr::App(Box::new(nu), Box::new(v));
-    
-    // (n (n u v))
-    BExpr::App(Box::new(n_const), Box::new(nuv))
+    let s_const = BExpr::Const(s_node(g));
+    let su = BExpr::App(Box::new(s_const), Box::new(u));
+    BExpr::App(Box::new(su), Box::new(v))
 }
 
 fn bexpr_i(g: &mut Graph) -> BExpr {
-    // I = Leaf Leaf
-    // (n n) -> Stem(n) -> I
-    let n = g.add(Node::Leaf);
-    let n_const = BExpr::Const(n);
-    BExpr::App(Box::new(n_const.clone()), Box::new(n_const))
+    // I = S K K
+    let s_const = BExpr::Const(s_node(g));
+    let k_const = BExpr::Const(k_node(g));
+    let sk = BExpr::App(Box::new(s_const), Box::new(k_const.clone()));
+    BExpr::App(Box::new(sk), Box::new(k_const))
 }
 
 fn bexpr_occurs(name: &str, e: &BExpr) -> bool {

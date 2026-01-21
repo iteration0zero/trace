@@ -1,18 +1,11 @@
-use trace::arena::{Graph, Node, Primitive};
+use trace::arena::{Graph, Node};
 use trace::types::{Type, TypeEnv};
 use trace::inference::{InferenceEngine, Constraint};
 
-// Helper: Check if type of `node` unifies with `expected`.
-fn checks_unifies(g: &Graph, node: trace::arena::NodeId, expected: Type) -> bool {
+fn assert_subtype(t1: Type, t2: Type) {
     let mut engine = InferenceEngine::new();
-    let env = TypeEnv::new(); // Empty environment
-    match engine.infer(g, node, &env) {
-        Ok(ty) => {
-             engine.constraints.push(Constraint::Equality(ty, expected));
-             engine.solve().is_ok()
-        },
-        Err(_) => false,
-    }
+    engine.constraints.push(Constraint::Subtype(t1, t2));
+    assert!(engine.solve().is_ok(), "Expected subtype constraint to hold");
 }
 
 // Helper: Run inference on a graph rooted at `root` and return the type.
@@ -64,69 +57,85 @@ fn test_structural_inference() {
 }
 
 #[test]
-fn test_identity_polymorphism() {
-    let mut g = Graph::new();
-    let leaf = g.add(Node::Leaf); 
-    let identity = g.add(Node::Stem(leaf)); // Rule: Leaf Leaf y -> y. So Stem(Leaf) is Identity.
-    
-    // Identity should unify with Float -> Float
-    let target = Type::Arrow(Box::new(Type::Float), Box::new(Type::Float));
-    assert!(checks_unifies(&g, identity, target), "Stem(Leaf) should act as Identity (Float -> Float)");
-    
-    // Identity should unify with Leaf -> Leaf
-    let target2 = Type::Arrow(Box::new(Type::Leaf), Box::new(Type::Leaf));
-    assert!(checks_unifies(&g, identity, target2), "Stem(Leaf) should act as Identity (Leaf -> Leaf)");
+fn test_leaf_subtyping_axiom() {
+    // L < U -> S U
+    let u = Type::Float;
+    let target = Type::Arrow(Box::new(u.clone()), Box::new(Type::Stem(Box::new(u))));
+    assert_subtype(Type::Leaf, target);
 }
 
 #[test]
-fn test_k_combinator_polymorphism() {
-    let mut g = Graph::new();
-    let val_x = g.add(Node::Float(10.0));
-    let stem_x = g.add(Node::Stem(val_x)); 
-    let k_x = g.add(Node::Stem(stem_x)); // Rule: Leaf (Leaf x) y -> x. Stem(Stem(x)) is K x.
-    
-    // K x should unify with Any -> x
-    // Test: K(Float) unifies with Leaf -> Float
-    let target = Type::Arrow(Box::new(Type::Leaf), Box::new(Type::Float));
-    assert!(checks_unifies(&g, k_x, target), "Stem(Stem(x)) should act as K x (y -> x)");
+fn test_stem_subtyping_axiom() {
+    // S U < V -> F U V
+    let u = Type::Leaf;
+    let v = Type::Float;
+    let target = Type::Arrow(
+        Box::new(v.clone()),
+        Box::new(Type::Pair(Box::new(u.clone()), Box::new(v))),
+    );
+    assert_subtype(Type::Stem(Box::new(u)), target);
 }
 
 #[test]
-fn test_s_combinator_inference() {
-    // S behavior: Leaf (Leaf x y) z -> x z (y z)
-    // Matches: Stem(Fork(x, y)) z -> x z (y z)
-    // S I I = Stem(Fork(I, I))
-    
-    let mut g = Graph::new();
-    let l = g.add(Node::Leaf);
-    let i = g.add(Node::Stem(l)); // I = Stem(Leaf)
-    
-    let fork_ii = g.add(Node::Fork(i, i));
-    let s_ii = g.add(Node::Stem(fork_ii)); // S I I
-    
-    // S I I should unify with I -> I (which is Leaf -> Leaf)
-    // Logic: S I I x -> I x (I x) -> x x.
-    // Use x = Leaf? x x = Stem(Leaf) = I. 
-    // No. Type system.
-    // S I I :: (Leaf -> Leaf) -> (Leaf -> Leaf) ?
-    // I :: A -> A.
-    // S I I returns I (approx).
-    
-    let target = Type::Arrow(Box::new(Type::Leaf), Box::new(Type::Leaf));
-    
-    let app = g.add(Node::App { func: s_ii, args: smallvec::smallvec![l] });
-    // Note: Applying to 'Leaf' (l).
-    // if x=Leaf is Identity? No, I=Stem(Leaf).
-    // Application is S I I Leaf. Leaf is passed as arg.
-    // Result I Leaf (I Leaf) -> Leaf Leaf -> I (Stem(Leaf)).
-    // Wait. I Leaf -> Leaf? No. I x -> x.
-    // I Leaf -> Leaf.
-    // So result is Leaf.
-    // Type of Leaf is Type::Leaf.
-    
-    let ty = infer_helper(&g, app).expect("S combinator application failed");
-    // S I I Leaf -> Stem(Leaf) (Identity)
-    assert_eq!(ty, Type::Stem(Box::new(Type::Leaf)));
+fn test_k_subtyping_axiom() {
+    // F L U < V -> U
+    let u = Type::Float;
+    let target = Type::Arrow(Box::new(Type::Leaf), Box::new(u.clone()));
+    let fork = Type::Pair(Box::new(Type::Leaf), Box::new(u));
+    assert_subtype(fork, target);
+}
+
+#[test]
+fn test_triage_subtyping_axioms() {
+    // Leaf-case: F (F T V) W < L -> T
+    let t = Type::Float;
+    let v = Type::Leaf;
+    let w = Type::Leaf;
+    let left = Type::Pair(Box::new(t.clone()), Box::new(v));
+    let fork = Type::Pair(Box::new(left), Box::new(w));
+    let target = Type::Arrow(Box::new(Type::Leaf), Box::new(t.clone()));
+    assert_subtype(fork, target);
+
+    // Stem-case: F (F U (V -> T)) W < S V -> T
+    let u = Type::Leaf;
+    let v2 = Type::Float;
+    let t2 = Type::Float;
+    let left2 = Type::Pair(
+        Box::new(u),
+        Box::new(Type::Arrow(Box::new(v2.clone()), Box::new(t2.clone()))),
+    );
+    let fork2 = Type::Pair(Box::new(left2), Box::new(Type::Leaf));
+    let target2 = Type::Arrow(Box::new(Type::Stem(Box::new(v2))), Box::new(t2));
+    assert_subtype(fork2, target2);
+
+    // Fork-case: F (F U V) (W1 -> W2 -> T) < F W1 W2 -> T
+    let w1 = Type::Float;
+    let w2 = Type::Leaf;
+    let t3 = Type::Float;
+    let left3 = Type::Pair(Box::new(Type::Leaf), Box::new(Type::Leaf));
+    let right3 = Type::Arrow(
+        Box::new(w1.clone()),
+        Box::new(Type::Arrow(Box::new(w2.clone()), Box::new(t3.clone()))),
+    );
+    let fork3 = Type::Pair(Box::new(left3), Box::new(right3));
+    let target3 = Type::Arrow(
+        Box::new(Type::Pair(Box::new(w1), Box::new(w2))),
+        Box::new(t3),
+    );
+    assert_subtype(fork3, target3);
+
+    // S axiom: F (S (U -> V -> T)) (U -> V) < U -> T
+    let u4 = Type::Float;
+    let v4 = Type::Leaf;
+    let t4 = Type::Float;
+    let left4 = Type::Stem(Box::new(Type::Arrow(
+        Box::new(u4.clone()),
+        Box::new(Type::Arrow(Box::new(v4.clone()), Box::new(t4.clone()))),
+    )));
+    let right4 = Type::Arrow(Box::new(u4.clone()), Box::new(v4));
+    let fork4 = Type::Pair(Box::new(left4), Box::new(right4));
+    let target4 = Type::Arrow(Box::new(u4), Box::new(t4));
+    assert_subtype(fork4, target4);
 }
 
 #[test]

@@ -136,20 +136,14 @@ impl InferenceEngine {
                              self.constraints.push(Constraint::Equality(res_ty, *ret));
                         }
                         f => {
-                             // Defer to unification logic (handles Var, Leaf, Stem, Pair via our extensions)
-                             // Warning: unifying f with Arrow(arg, res) enforces arg == param.
-                             // We need arg <= param.
-                             let a_res = self.resolve_type(arg_ty);
-                             let r_res = self.resolve_type(res_ty);
-                             
                              let param_var = self.fresh_var();
-                             let arrow = Type::Arrow(Box::new(param_var.clone()), Box::new(r_res));
+                             let arrow = Type::Arrow(Box::new(param_var.clone()), Box::new(res_ty));
                              
-                             // Constrain f to be an arrow taking param_var
-                             self.unify(f, arrow)?;
+                             // Constrain f to be usable as a function via subtyping axioms.
+                             self.constraints.push(Constraint::Subtype(f, arrow));
                              
                              // Constrain arg to be subtype of param_var
-                             self.constraints.push(Constraint::Subtype(a_res, param_var));
+                             self.constraints.push(Constraint::Subtype(arg_ty, param_var));
                         }
                     }
                 }
@@ -258,91 +252,70 @@ impl InferenceEngine {
                  self.is_subtype(*a1, *a2, visited) && self.is_subtype(*b1, *b2, visited)
              },
 
-             // Functional Behavior for Leaf: Leaf :: forall A. A -> Stem(A)
-             // Leaf <= A -> B if Stem(A) <= B
+             // Leaf < U -> Stem(U)
              (Type::Leaf, Type::Arrow(a, b)) => {
-                 let stem_a = Type::Stem(a); // Takes target arg type A
+                 let stem_a = Type::Stem(a);
                  self.is_subtype(stem_a, *b, visited)
              },
 
-             // Functional Behavior for Stem
+             // Stem(U) < V -> Pair(U, V)
              (Type::Stem(inner), Type::Arrow(arg, res)) => {
-                 match inner.as_ref() {
-                     Type::Leaf => {
-                         // Identity: A -> A
-                         // A -> A <= Arg -> Res
-                         // Arg <= A ? No, Arg IS A.
-                         // But Identity accepts ANYTHING.
-                         // Identity :: forall T. T -> T.
-                         // We are checking if Identity <= Arg -> Res.
-                         // This means (Arg -> Arg) <= (Arg -> Res).
-                         // LHS takes Arg, returns Arg.
-                         // RHS expects function taking Arg, returning Res.
-                         // So Ret(LHS) <= Ret(RHS).
-                         // Arg <= Res.
-                         self.is_subtype(*arg, *res, visited)
-                     },
-                     Type::Stem(x) => {
-                         // K x: A -> x
-                         // (Arg -> x) <= (Arg -> Res)
-                         // x <= Res.
-                         self.is_subtype(*x.clone(), *res, visited)
-                     },
-                     Type::Pair(x, z) => {
-                         // S x z: A -> (x A)(z A)
-                         // (Arg -> (x Arg)(z Arg)) <= (Arg -> Res)
-                         // (x Arg)(z Arg) <= Res
-                         
-                         // We need to simulate application of x and z?
-                         // But is_subtype shouldn't mutate/generate constraints?
-                         // Subtyping check usually structural.
-                         // This requires generating constraints/unification if we don't know x/z types fully.
-                         // Example: if x is Var?
-                         
-                         // If we are in is_subtype, we might be blocked.
-                         // Fallback to false? Or try?
-                         // S combinator subtyping is complex.
-                         // But unification handled it. If we are here, strict check failed?
-                         // If we return 'true' we claim it works.
-                         // If we generate type application constraints here?
-                         // Logic below mirrors Unify logic, but as check.
-                         // Can't easily do it without mutable Constraint list (which we have: &mut self).
-                         
-                         // Recreating the application constraint:
-                         // We want to ENFORCE (x Arg)(z Arg) <= Res.
-                         // We can push constraints!
-                         
-                         // Create fresh vars for intermediate?
-                         let res1 = self.fresh_var();
-                         let res2 = self.fresh_var();
-                         let a_clone = *arg.clone();
-                         
-                         // x Arg -> res1
-                         // z Arg -> res2
-                         // res1 res2 -> Res
-                         
-                         // Since is_subtype returns bool, we should return true IF we successfully scheduled checks?
-                         // Pushing constraints ensures they will be checked later.
-                         
-                         self.constraints.push(Constraint::Applicable(*x.clone(), a_clone.clone(), res1.clone()));
-                         self.constraints.push(Constraint::Applicable(*z.clone(), a_clone, res2.clone()));
-                         // We want result <= Res.
-                         // Constraint::Applicable enforces equality usually (res1 res2 = result).
-                         // We can set Constraint::Applicable(res1, res2, Res).
-                         // Or if we want subtype?
-                         // Constraint::Applicable gives equality result.
-                         // If we do Applicable to strict `Res`, we enforce Equality.
-                         // Subtyping requires Result <= Res.
-                         // Let `final_res` be result.
-                         
-                         let final_res = self.fresh_var();
-                         self.constraints.push(Constraint::Applicable(res1, res2, final_res.clone()));
-                         self.constraints.push(Constraint::Subtype(final_res, *res));
-                         
-                         true
-                     },
-                     _ => false
+                 let pair = Type::Pair(inner, arg);
+                 self.is_subtype(pair, *res, visited)
+             },
+
+             // Fork subtyping axioms for triage calculus
+             (Type::Pair(left, right), Type::Arrow(arg, res)) => {
+                 // K axiom: F L U < V -> U
+                 if matches!(left.as_ref(), Type::Leaf) {
+                     return self.is_subtype(*right.clone(), *res, visited);
                  }
+
+                 // Leaf-case triage: F (F T V) W < L -> T
+                 if matches!(arg.as_ref(), Type::Leaf) {
+                     if let Type::Pair(t, _v) = left.as_ref() {
+                         return self.is_subtype(*t.clone(), *res, visited);
+                     }
+                 }
+
+                 // Stem-case triage: F (F U (V -> T)) W < S V -> T
+                 if let Type::Stem(v_arg) = arg.as_ref() {
+                     if let Type::Pair(_u, v_arrow) = left.as_ref() {
+                         if let Type::Arrow(v, t) = v_arrow.as_ref() {
+                             return self.is_subtype(*v_arg.clone(), *v.clone(), visited)
+                                 && self.is_subtype(*t.clone(), *res, visited);
+                         }
+                     }
+                 }
+
+                 // Fork-case triage: F (F U V) (W1 -> W2 -> T) < F W1 W2 -> T
+                 if let Type::Pair(w1, w2) = arg.as_ref() {
+                     if let Type::Pair(_u, _v) = left.as_ref() {
+                         if let Type::Arrow(w1_t, w2_arrow) = right.as_ref() {
+                             if let Type::Arrow(w2_t, t) = w2_arrow.as_ref() {
+                                 return self.is_subtype(*w1.clone(), *w1_t.clone(), visited)
+                                     && self.is_subtype(*w2.clone(), *w2_t.clone(), visited)
+                                     && self.is_subtype(*t.clone(), *res, visited);
+                             }
+                         }
+                     }
+                 }
+
+                 // S axiom: F (S (U -> V -> T)) (U -> V) < U -> T
+                 if let Type::Stem(s_inner) = left.as_ref() {
+                     if let Type::Arrow(u, uv) = s_inner.as_ref() {
+                         if let Type::Arrow(v, t) = uv.as_ref() {
+                             let s_ok = self.is_subtype(*right.clone(), Type::Arrow(u.clone(), v.clone()), visited)
+                                 && self.is_subtype(*arg.clone(), *u.clone(), visited)
+                                 && self.is_subtype(*t.clone(), *res, visited);
+                             if s_ok {
+                                 return true;
+                             }
+                         }
+                     }
+                 }
+
+                 false
              },
              
              // Bool Subtyping
@@ -403,84 +376,7 @@ impl InferenceEngine {
                 self.unify(*b1, *b2)
             }
             
-            // Core Calculus Unification Rules (Structural S-Combinator Logic)
-            (Type::Leaf, Type::Arrow(a, b)) | (Type::Arrow(a, b), Type::Leaf) => {
-                 // Rule 1: Leaf a -> Stem(a)
-                 // Matches Stem construction in engine.
-                 self.unify(*b, Type::Stem(a))
-            }
-            (Type::Stem(i), Type::Arrow(a, b)) | (Type::Arrow(a, b), Type::Stem(i)) => {
-                 // Canonical Tree Calculus Unification
-                 // Stem(i) is applied to 'a' producing 'b'.
-                 // Dispatch based on structure of 'i' (the content of the Stem).
-                 
-                 match i.as_ref() {
-                     Type::Leaf => {
-                         // Rule 1: Stem(Leaf) a -> a
-                         // Identity: a must unify with b
-                         self.unify(*a, *b)
-                     },
-                     Type::Stem(x) => {
-                         // Rule 2: Stem(Stem(x)) a -> x
-                         // K combinator: b must unify with x
-                         self.unify(*b, *x.clone())
-                     },
-                     Type::Pair(x, z) => {
-                         // Rule 3: Stem(Fork(x, z)) a -> (x a) (z a)
-                         // S combinator behavior.
-                         let res1 = self.fresh_var();
-                         let res2 = self.fresh_var();
-                         
-                         let arg = *a.clone();
-                         // x a -> res1
-                         self.constraints.push(Constraint::Applicable(*x.clone(), arg.clone(), res1.clone()));
-                         // z a -> res2
-                         self.constraints.push(Constraint::Applicable(*z.clone(), arg, res2.clone()));
-                         // res1 res2 -> b
-                         self.constraints.push(Constraint::Applicable(res1, res2, *b));
-                         Ok(())
-                     },
-                     _ => {
-                         // Fallback / Generic S-rule?
-                         // If 'i' is Var or other, we might presume it will eventually become Fork-like or Stem-like?
-                         // In the original Triage logic, Stem(i) a -> Fork(i, a).
-                         // That is NO LONGER VALID for canonical calculus in the general case?
-                         // Wait, if i is simple Leaf/Stem/Fork, we covered it.
-                         // If i is Float/Prim/Var?
-                         // In engine::reduce_step: 
-                         //   Stem(p) q -> (if p ! Leaf/Stem/Fork) -> Stuck? Or Fork(p, q)?
-                         //   My engine change made it return Fork(p, q) ONLY if p is NOT Leaf/Stem/Fork.
-                         //   So if i is Float, Stem(Float) a -> Fork(Float, a).
-                         //   If i is Var, we don't know yet.
-                         
-                         // We should unify with Pair(i, a) as a safe fallback for Data Construction?
-                         // If i turns out to be Leaf later, we have a problem: Pair(Leaf, a) != a.
-                         // This is a soundness issue if we eagerly commit to Pair.
-                         
-                         // Ideally we should defer constraint if 'i' is Var.
-                         // But we don't have deferred constraints mechanism easily here except sticking it back in?
-                         // For now, let's assume if it's not structural, it's data.
-                         // Unifying b = Fork(i, a)
-                         self.unify(*b, Type::Pair(i.clone(), a))
-                     }
-                 }
-            }
-            (Type::Pair(p1, p2), Type::Arrow(a, b)) | (Type::Arrow(a, b), Type::Pair(p1, p2)) => {
-                 // Fork(p, q) applied.
-                 // In canonical calculus, this doesn't reduce.
-                 // It's a type error or just inert?
-                 // If we treat it as inert app, we can't unify with Arrow unless it's a specific Arrow type?
-                 // Actually, if something IS a Pair, and we use it as Arrow, we implies it has function behavior.
-                 // But Fork doesn't.
-                 // So we should Error?
-                 // Or treat as "Any" -> "Any"?
-                 // Let's error for now to be strict.
-                 Err(format!("Type Error: Pair {:?} {:?} cannot function as Arrow", p1, p2))
-            }
-            (Type::Float, Type::Arrow(_a, b)) | (Type::Arrow(_a, b), Type::Float) => {
-                 // Treat Float as Const: Float x -> Float
-                 self.unify(*b, Type::Float)
-            }
+            // Structural/function relationships are handled via subtyping axioms.
             
             // Union Handling: T unifies with Union if T is subtype of one element
             (t, Type::Union(ts)) | (Type::Union(ts), t) => {

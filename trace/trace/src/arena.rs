@@ -87,28 +87,24 @@ impl Graph {
     }
 
     pub fn add(&mut self, node: Node) -> NodeId {
-        // Canonicalization: App(Leaf, [x]) -> Stem(x)
-        // This is done during construction to ensure canon forms.
-        // But be careful: App might be used for 'unevaluated' redexes vs 'structural' values.
-        // In Triage, (n x) IS Stem(x). 
-        // So allow construction of structural nodes from Apps where applicable.
-        
+        // Canonicalize partial applications of the node operator to factorable forms.
+        // In triage calculus: (n x) is Stem(x) and (n x y) is Fork(x, y).
         let node = match node {
              Node::App { func, ref args } => {
-                 // We need to resolve func. But func is just an ID.
-                 // We can check if func points to Leaf in *this* graph.
                  if let Some(f_node) = self.nodes.get(func.0 as usize) {
                       match f_node {
                           Node::Leaf => {
-                              if args.len() == 1 {
-                                  Node::Stem(self.resolve(args[0]))
-                              } else {
-                                  node // Defer reduction/canonicalization of Leaf x y ...
+                              match args.len() {
+                                  1 => Node::Stem(*args.get(0).unwrap()),
+                                  2 => Node::Fork(*args.get(0).unwrap(), *args.get(1).unwrap()),
+                                  _ => node, // 3+ args remain an App redex
                               }
                           },
                           Node::Stem(x) => {
-                              // Defer reduction
-                              node 
+                              match args.len() {
+                                  1 => Node::Fork(*x, *args.get(0).unwrap()),
+                                  _ => node, // 2+ args remain an App redex
+                              }
                           },
                           _ => node
                       }

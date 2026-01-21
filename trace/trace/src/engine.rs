@@ -79,172 +79,179 @@ pub fn reduce(g: &mut Graph, id: NodeId, ctx: &mut EvalContext) -> NodeId {
     curr
 }
 
+fn is_factorable(g: &Graph, id: NodeId) -> bool {
+    matches!(g.get(g.resolve(id)), Node::Leaf | Node::Stem(_) | Node::Fork(_, _))
+}
+
 pub fn reduce_step(g: &mut Graph, root: NodeId, ctx: &mut EvalContext) -> bool {
+    if ctx.depth > ctx.depth_limit {
+        return false;
+    }
+
+    let root = g.resolve(root);
     let node_clone = g.get(root).clone();
-    
+
     match node_clone {
-        Node::App { func, args } => {
-            let func_id = func;
-            if ctx.depth > ctx.depth_limit { return false; }
-            
-            let f_prime = reduce_whnf_depth(g, func_id, ctx.depth + 1);
-            if f_prime != func_id {
-                let new_args = args.clone();
-                let new_node = Node::App { func: f_prime, args: new_args };
-                let new_id = g.add(new_node);
-                g.replace(root, Node::Ind(new_id));
+        Node::App { .. } => reduce_app(g, root, ctx),
+        Node::Stem(inner) => reduce_step(g, inner, ctx),
+        Node::Fork(l, r) => {
+            if reduce_step(g, l, ctx) {
+                true
+            } else {
+                reduce_step(g, r, ctx)
+            }
+        }
+        _ => false,
+    }
+}
+
+fn reduce_app(g: &mut Graph, root: NodeId, ctx: &mut EvalContext) -> bool {
+    let mut stack = Vec::new();
+    let mut curr = root;
+
+    loop {
+        let resolved = g.resolve(curr);
+        let node = g.get(resolved).clone();
+        if let Node::App { func, .. } = node {
+            stack.push(resolved);
+            curr = func;
+        } else {
+            break;
+        }
+    }
+
+    for &app_id in &stack {
+        let app_node = g.get(app_id).clone();
+        let (func, args) = if let Node::App { func, args } = app_node {
+            (func, args)
+        } else {
+            continue;
+        };
+
+        if attempt_reduction(g, app_id, func, &args, ctx) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn attempt_reduction(
+    g: &mut Graph,
+    root: NodeId,
+    head: NodeId,
+    args: &SmallVec<[NodeId; 2]>,
+    ctx: &mut EvalContext,
+) -> bool {
+    let head_node = g.get(g.resolve(head)).clone();
+
+    match head_node {
+        Node::Leaf => {
+            if args.len() >= 3 {
+                triage_reduce(g, root, args[0], args[1], args[2], &args[3..], ctx)
+            } else if args.len() == 2 {
+                let fork = g.add(Node::Fork(args[0], args[1]));
+                g.replace(root, Node::Ind(fork));
+                true
+            } else if args.len() == 1 {
+                let stem = g.add(Node::Stem(args[0]));
+                g.replace(root, Node::Ind(stem));
+                true
+            } else {
+                false
+            }
+        }
+        Node::Stem(p) => {
+            if args.len() >= 2 {
+                triage_reduce(g, root, p, args[0], args[1], &args[2..], ctx)
+            } else {
+                false
+            }
+        }
+        Node::Fork(p, q) => {
+            if args.len() >= 1 {
+                triage_reduce(g, root, p, q, args[0], &args[1..], ctx)
+            } else {
+                false
+            }
+        }
+        Node::Prim(p) => {
+            if let Some(res) = apply_primitive(g, p, args) {
+                g.replace(root, Node::Ind(res));
                 return true;
             }
-            
-            let func_node = g.get(f_prime).clone();
-            // println!("DEBUG: reduce_step dispatch func={:?} args={}", func_node, args.len());
 
-            match func_node {
-                Node::Leaf => {
-                    // Leaf Rules
-                    match args.len() {
-                        0 => { g.replace(root, Node::Ind(f_prime)); return true; }
-                        1 => {
-                            // (Leaf x) -> Stem(x)
-                            let stem = g.add(Node::Stem(args[0]));
-                            g.replace(root, Node::Ind(stem));
-                            return true;
-                        },
-                        _ => {
-                            // (Leaf x y ...) -> App(Stem(x), y, ...)
-                            let p = args[0];
-                            let stem = g.add(Node::Stem(p));
-                            let rest: SmallVec<[NodeId; 2]> = args[1..].iter().cloned().collect();
-                            let new_app = g.add(Node::App { func: stem, args: rest });
-                            g.replace(root, Node::Ind(new_app));
-                            return true;
-                        }
-                    }
+            let mut changed = false;
+            let mut sub_ctx = EvalContext::default();
+            sub_ctx.step_limit = 100;
+            sub_ctx.depth = ctx.depth + 1;
+            for &arg in args {
+                if reduce_step(g, arg, &mut sub_ctx) {
+                    changed = true;
+                    break;
                 }
-                Node::Stem(p) => {
-                    // Stem(p) Rules
-                    // 1. Stem(Leaf) q -> q
-                    // 2. Stem(Stem x) q -> x
-                    // 3. Stem(Fork x z) q -> x q (z q)
-                    // Fallback: Stem(p) q -> Fork(p, q)
-                    
-                    if args.len() == 0 {
-                        g.replace(root, Node::Ind(f_prime)); 
-                        return true;
-                    }
-                    
-                    let p_res = g.resolve(p);
-                    match g.get(p_res).clone() {
-                        Node::Leaf => {
-                            // Rule 1: Stem(Leaf) q -> q
-                            let q = args[0];
-                            let mut res = q;
-                            if args.len() > 1 {
-                                let rest: SmallVec<[NodeId; 2]> = args[1..].iter().cloned().collect();
-                                res = g.add(Node::App{ func: q, args: rest });
-                            }
-                            g.replace(root, Node::Ind(res));
-                            return true;
-                        },
-                        Node::Stem(x) => {
-                            // Rule 2: Stem(Stem x) q -> x
-                            let mut res = x;
-                            if args.len() > 1 {
-                                let rest: SmallVec<[NodeId; 2]> = args[1..].iter().cloned().collect();
-                                res = g.add(Node::App{ func: x, args: rest });
-                            }
-                            g.replace(root, Node::Ind(res));
-                            return true;
-                        },
-                        Node::Fork(x, z) => {
-                            // Rule 3: S-combinator
-                            let q = args[0];
-                            let xq = g.add(Node::App{ func: x, args: smallvec::smallvec![q] });
-                            let zq = g.add(Node::App{ func: z, args: smallvec::smallvec![q] });
-                            let mut new_args = smallvec::smallvec![zq];
-                            if args.len() > 1 { new_args.extend(args[1..].iter().cloned()); }
-                            let res = g.add(Node::App{ func: xq, args: new_args });
-                            g.replace(root, Node::Ind(res));
-                            return true;
-                        },
-                        _ => {
-                            // Fallback: Data construction Fork(p, q)
-                            // Stem(p) q ... -> Fork(p, q) ...
-                            // BUT wait, Fork(p, q) applied to args?
-                            // Fork(p, q) does NOT reduce arguments.
-                            // So we create App(Fork(p, q), rest).
-                            // But what if rest is empty?
-                            
-                            let q = args[0];
-                            let fork = g.add(Node::Fork(p, q));
-                            
-                            if args.len() > 1 {
-                                let rest: SmallVec<[NodeId; 2]> = args[1..].iter().cloned().collect();
-                                let new_app = g.add(Node::App { func: fork, args: rest });
-                                g.replace(root, Node::Ind(new_app));
-                            } else {
-                                g.replace(root, Node::Ind(fork));
-                            }
-                            return true;
-                        }
-                    }
-                }
-                Node::Fork(p, q) => {
-                    // Fork(p, q) applied?
-                    // S-combinator logic? 
-                    // NO. Fork does not reduce when applied in this calculus usually.
-                    // BUT my S-encoding generates App(Fork...).
-                    // If I implement S logic here: Fork(p, q) args -> p args (q args)
-                    if args.len() == 0 { return false; } // Should not happen in App
-                    let y = args[0];
-                    let py = g.add(Node::App{ func: p, args: smallvec::smallvec![y] });
-                    let qy = g.add(Node::App{ func: q, args: smallvec::smallvec![y] });
-                    let mut new_args = smallvec::smallvec![qy];
-                    if args.len() > 1 { new_args.extend(args[1..].iter().cloned()); }
-                    let res = g.add(Node::App{ func: py, args: new_args });
-                    g.replace(root, Node::Ind(res));
-                    return true;
-                }
-                Node::Prim(p) => {
-                    if let Some(res) = apply_primitive(g, p, &args) {
-                        g.replace(root, Node::Ind(res));
-                        return true;
-                    } 
-                    // Reduce args if stuck
-                    let mut changed = false;
-                    let mut sub_ctx = EvalContext::default();
-                    sub_ctx.step_limit = 100;
-                    sub_ctx.depth = ctx.depth + 1;
-                    for &arg in &args {
-                        if reduce_step(g, arg, &mut sub_ctx) {
-                            changed = true;
-                            break; 
-                        }
-                    }
-                    changed
-                }
-                Node::App { func: inner_f, args: inner_args } => {
-                     let mut new_args = inner_args.clone();
-                     new_args.extend(args.iter().cloned());
-                     let new_node = Node::App { func: inner_f, args: new_args };
-                     let new_id = g.add(new_node);
-                     g.replace(root, Node::Ind(new_id));
-                     return true;
-                }
-                // Ind handled by resolve. Float not applicable.
-                _ => false,
+            }
+            changed
+        }
+        Node::App { func: inner_f, args: inner_args } => {
+            let mut new_args = inner_args.clone();
+            new_args.extend(args.iter().cloned());
+            let new_node = Node::App { func: inner_f, args: new_args };
+            let new_id = g.add(new_node);
+            g.replace(root, Node::Ind(new_id));
+            true
+        }
+        _ => false,
+    }
+}
+
+fn triage_reduce(
+    g: &mut Graph,
+    root: NodeId,
+    p: NodeId,
+    q: NodeId,
+    r: NodeId,
+    rest: &[NodeId],
+    ctx: &mut EvalContext,
+) -> bool {
+    if !is_factorable(g, p) {
+        return reduce_step(g, p, ctx);
+    }
+
+    let p_node = g.get(g.resolve(p)).clone();
+    let res = match p_node {
+        // Rule 1: △△ y z -> y
+        Node::Leaf => Some(q),
+        // Rule 2: △(△x) y z -> x z (y z)
+        Node::Stem(x) => {
+            let xz = g.add(Node::App { func: x, args: smallvec::smallvec![r] });
+            let yz = g.add(Node::App { func: q, args: smallvec::smallvec![r] });
+            Some(g.add(Node::App { func: xz, args: smallvec::smallvec![yz] }))
+        }
+        // Rules 3-5: triage on z when p is a fork
+        Node::Fork(w, x) => {
+            if !is_factorable(g, r) {
+                return reduce_step(g, r, ctx);
+            }
+
+            match g.get(g.resolve(r)).clone() {
+                Node::Leaf => Some(w),
+                Node::Stem(u) => Some(g.add(Node::App { func: x, args: smallvec::smallvec![u] })),
+                Node::Fork(u, v) => Some(g.add(Node::App { func: q, args: smallvec::smallvec![u, v] })),
+                _ => None,
             }
         }
-        Node::Stem(inner) => {
-             // Reduce inner?
-             reduce_step(g, inner, ctx)
+        _ => None,
+    };
+
+    if let Some(mut result) = res {
+        for &arg in rest {
+            result = g.add(Node::App { func: result, args: smallvec::smallvec![arg] });
         }
-        Node::Fork(l, r) => {
-             if reduce_step(g, l, ctx) { return true; }
-             reduce_step(g, r, ctx)
-        }
-        // Prim, Leaf, Float, Ind are Values (or Ind handled by resolve)
-        _ => false,
+        g.replace(root, Node::Ind(result));
+        true
+    } else {
+        false
     }
 }
 
@@ -679,146 +686,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_reduce_leaf() {
-        // Canonical Rule 1: Leaf Leaf y -> y (Identity)
+    fn test_triage_rule_k() {
+        // Rule 1: △△ y z -> y
         let mut g = Graph::new();
         let n = g.add(Node::Leaf);
         let y = g.add(Node::Float(2.0));
-        
-        // (n n y)
-        let term = g.add(Node::App { 
-            func: n, 
-            args: smallvec::smallvec![n, y] 
-        });
-        
-        let mut ctx = EvalContext::default();
-        let res = reduce(&mut g, term, &mut ctx);
-        assert_eq!(res, y, "Identity rule failed: Leaf Leaf y -> y");
+        let z = g.add(Node::Float(3.0));
 
-        // Canonical Rule 2: Leaf (Leaf x) y -> x (K Combinator)
-        // Construct Leaf (Leaf x) -> Stem(Stem(x))
-        let x = g.add(Node::Float(1.0));
-        let stem_x = g.add(Node::Stem(x));
-        let k_x = g.add(Node::Stem(stem_x));
-        
-        // Apply to y
-        let term2 = g.add(Node::App {
-            func: k_x,
-            args: smallvec::smallvec![y]
-        });
-        
-        let res2 = reduce(&mut g, term2, &mut ctx);
-        assert_eq!(res2, x, "K rule failed: Leaf (Leaf x) y -> x");
-    }
-
-    #[test]
-    fn test_reduce_fork() {
-        // Canonical Rule 3: Leaf (Leaf x z) y -> x y (z y) (S Combinator)
-        // Structure: Leaf (Leaf x z) corresponds to Stem(Fork(x, z))
-        let mut g = Graph::new();
-        
-        let x = g.add(Node::Leaf); // x = Leaf (Identity I when applied twice?)
-        // Let's make x and z identities so result is simple?
-        // Let's use K for x and I for z?
-        // S K K y -> K y (K y) -> y. (Identity)
-        // S I I y -> I y (I y) -> y y.
-        
-        // Let's just use Floats and check structure result.
-        // x, z are dummy functions.
-        let x = g.add(Node::Leaf); // Use Leaf? No, usage: x y. Leaf y -> Stem(y).
-        let z = g.add(Node::Leaf);
-        
-        // Stem(Fork(x, z))
-        let fork_xz = g.add(Node::Fork(x, z));
-        let s_xz = g.add(Node::Stem(fork_xz));
-        
-        let y = g.add(Node::Float(42.0));
-        
-        // Apply S x z y
-        let term = g.add(Node::App {
-            func: s_xz,
-            args: smallvec::smallvec![y]
-        });
-        
-        let mut ctx = EvalContext::default();
-        let res = reduce(&mut g, term, &mut ctx);
-        
-        // Expected: x y (z y)
-        // x y -> Stem(y) (since x=Leaf)
-        // z y -> Stem(y) (since z=Leaf)
-        // Stem(y) Stem(y) -> ???
-        // Stem(Float) Stem(Float) -> Fork(Float, Stem(Float)) [Fallback data construction]
-        
-        // Let's verify result structure.
-        // We expect App( App(x, y), App(z, y) ) ideally.
-        // But reduce reduces it.
-        
-        // Let's use x, z such that they don't reduce further or strictly reduce.
-        // If x, z are Floats?
-        // S F F y -> F y (F y).
-        // F y -> Fork(F, y).
-        // Fork(F, y) Fork(F, y) -> Stuck?
-        
-        // Just checking that we don't crash and get a result is weak.
-        // Let's check S K K = I behavior.
-        // K = Stem(Stem(Any)).
-        // Let x = K1, z = K2.
-        // S K1 K2 y -> K1 y (K2 y).
-        // K1 y -> K1_inner.
-        
-        // Let's stick to testing the reduction STEP result for one step?
-        // But reduce runs to normal form.
-        
-        // Use: S I I y -> y y.
-        // I = Stem(Leaf).
-        // x = I, z = I.
-        // y = Leaf.
-        // S I I Leaf -> I Leaf (I Leaf) -> Leaf Leaf -> I.
-        
-        let l = g.add(Node::Leaf);
-        let i = g.add(Node::Stem(l)); // I
-        
-        let fork_ii = g.add(Node::Fork(i, i));
-        let s_ii = g.add(Node::Stem(fork_ii)); // S I I
-        
-        let term_sii = g.add(Node::App {
-            func: s_ii,
-            args: smallvec::smallvec![l] // Apply to Leaf
-        });
-        
-        let res_sii = reduce(&mut g, term_sii, &mut ctx);
-        // Expect I (which is Stem(Leaf))
-        assert_eq!(res_sii, i, "S I I Leaf should reduce to I. Got: {}", unparse(&g, res_sii));
-    }
-    
-    #[test]
-    fn test_reduce_stem() {
-        // Rule 2: (n (n A) B C) -> B C (A C)
-        let mut g = Graph::new();
-        let n = g.add(Node::Leaf);
-        let a = g.add(Node::Float(1.0));
-        // Let b = n (Leaf).
-        let b = n;
-        let c = g.add(Node::Float(3.0));
-        
-        // n (n a)
-        let na = g.add(Node::Stem(a)); // (n a)
-        
-        // (n na b c)
         let term = g.add(Node::App {
             func: n,
-            args: smallvec::smallvec![na, b, c]
+            args: smallvec::smallvec![n, y, z],
         });
-        
+
         let mut ctx = EvalContext::default();
         let res = reduce(&mut g, term, &mut ctx);
-        
-        // Result is App(a, c)
-        // n (n a) is K a.
-        // K a b c -> a c.
-        
-        let ac = g.add(Node::App { func: a, args: smallvec::smallvec![c] });
-        assert_eq!(res, ac, "Expected App(a, c), got {}", unparse(&g, res));
+        assert_eq!(res, y, "K rule failed: △△ y z -> y");
+    }
+
+    #[test]
+    fn test_triage_rule_s() {
+        // Rule 2: △(△x) y z -> x z (y z)
+        let mut g = Graph::new();
+        let n = g.add(Node::Leaf);
+        let k = g.add(Node::Stem(n)); // K = △△
+
+        let x = k; // K
+        let y = n; // Leaf
+        let z = g.add(Node::Float(42.0));
+
+        let stem_x = g.add(Node::Stem(x));
+        let term = g.add(Node::App {
+            func: n,
+            args: smallvec::smallvec![stem_x, y, z],
+        });
+
+        let mut ctx = EvalContext::default();
+        let res = reduce(&mut g, term, &mut ctx);
+        assert_eq!(res, z, "S rule failed: △(△x) y z -> x z (y z)");
+    }
+
+    #[test]
+    fn test_triage_fork_cases() {
+        // Rules 3-5: triage on z when p is a fork
+        let mut g = Graph::new();
+        let n = g.add(Node::Leaf);
+
+        // Leaf case: △(△w x) y △ -> w
+        let w = g.add(Node::Float(1.0));
+        let x = g.add(Node::Leaf);
+        let y = g.add(Node::Leaf);
+        let fork_wx = g.add(Node::Fork(w, x));
+        let term_leaf = g.add(Node::App {
+            func: n,
+            args: smallvec::smallvec![fork_wx, y, n],
+        });
+        let mut ctx = EvalContext::default();
+        let res_leaf = reduce(&mut g, term_leaf, &mut ctx);
+        assert_eq!(res_leaf, w, "Fork leaf case failed");
+
+        // Stem case: △(△w x) y (△u) -> x u
+        let u = g.add(Node::Float(7.0));
+        let z_stem = g.add(Node::Stem(u));
+        let fork_wx2 = g.add(Node::Fork(w, n)); // x = Leaf
+        let term_stem = g.add(Node::App {
+            func: n,
+            args: smallvec::smallvec![fork_wx2, y, z_stem],
+        });
+        let mut ctx = EvalContext::default();
+        let res_stem = reduce(&mut g, term_stem, &mut ctx);
+        let expected_stem = g.add(Node::Stem(u)); // Leaf u -> Stem(u)
+        assert_eq!(res_stem, expected_stem, "Fork stem case failed");
+
+        // Fork case: △(△w x) y (△u v) -> y u v
+        let u2 = g.add(Node::Float(3.0));
+        let v2 = g.add(Node::Float(4.0));
+        let z_fork = g.add(Node::Fork(u2, v2));
+        let fork_wx3 = g.add(Node::Fork(w, x));
+        let term_fork = g.add(Node::App {
+            func: n,
+            args: smallvec::smallvec![fork_wx3, y, z_fork],
+        });
+        let mut ctx = EvalContext::default();
+        let res_fork = reduce(&mut g, term_fork, &mut ctx);
+        let expected_fork = g.add(Node::Fork(u2, v2));
+        assert_eq!(res_fork, expected_fork, "Fork fork case failed");
     }
     
     #[test]

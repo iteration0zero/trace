@@ -19,11 +19,20 @@ fn main() {
 
     // Standard Library (Prelude)
     let prelude = [
-        ("cons", "(fn a (fn b (n a b)))"),
-        ("first", "(fn p (n p n n))"),
-        ("rest", "(fn p (n p n (n n)))"),
-
-
+        ("k", "(n n)"),
+        ("s", "(n (n (k n)) n)"),
+        ("i", "(s k k)"),
+        ("true", "k"),
+        ("false", "n"),
+        ("triage", "(fn w (fn x (fn y (n (n w x) y))))"),
+        ("is-leaf", "(fn z ((triage true (fn u false) (fn u (fn v false))) z))"),
+        ("is-stem", "(fn z ((triage false (fn u true) (fn u (fn v false))) z))"),
+        ("is-fork", "(fn z ((triage false (fn u false) (fn u (fn v true))) z))"),
+        ("first", "(fn p ((triage n (fn u n) (fn a (fn b a))) p))"),
+        ("rest", "(fn p ((triage n (fn u n) (fn a (fn b b))) p))"),
+        ("stem", "(fn x (n x))"),
+        ("fork", "(fn a (fn b (n a b)))"),
+        ("cons", "fork"),
         ("leaf", "n"),
     ];
 
