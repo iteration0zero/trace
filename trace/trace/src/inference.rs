@@ -122,6 +122,12 @@ impl InferenceEngine {
         
         let ty = self.fresh_var();
         node_types.insert(node, ty.clone());
+
+        // Special-case typings for canonical tree combinators
+        if let Some(special_ty) = env.specials.get(&node.0).cloned() {
+            self.constraints.push(Constraint::Equality(ty, special_ty));
+            return Ok(());
+        }
         
         match g.get(node) {
             Node::Leaf => {

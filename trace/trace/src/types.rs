@@ -57,10 +57,15 @@ impl fmt::Debug for Type {
 pub struct TypeEnv {
     // Map variable names to Types
     pub vars: std::collections::HashMap<String, Type>,
+    // Special-case typings for canonical tree combinators (NodeId -> Type)
+    pub specials: std::collections::HashMap<u32, Type>,
 }
 
 impl TypeEnv {
     pub fn new() -> Self {
-        Self { vars: std::collections::HashMap::new() }
+        Self { 
+            vars: std::collections::HashMap::new(),
+            specials: std::collections::HashMap::new(),
+        }
     }
 }

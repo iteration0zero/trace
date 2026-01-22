@@ -1,4 +1,5 @@
-use crate::arena::{Graph, Node, NodeId, Primitive};
+use crate::arena::{Graph, Node, NodeId};
+use crate::engine::{reduce, EvalContext};
 use smallvec::SmallVec;
 
 #[derive(Debug, Clone)]
@@ -17,12 +18,45 @@ enum BExpr {
     App(Box<BExpr>, Box<BExpr>),
 }
 
+fn leaf_node(g: &mut Graph) -> NodeId {
+    g.add(Node::Leaf)
+}
+
+fn stem_node(g: &mut Graph, inner: NodeId) -> NodeId {
+    g.add(Node::Stem(inner))
+}
+
+fn fork_node(g: &mut Graph, left: NodeId, right: NodeId) -> NodeId {
+    g.add(Node::Fork(left, right))
+}
+
+// Canonical tree combinators (pure, factorable)
 fn k_node(g: &mut Graph) -> NodeId {
-    g.add(Node::Prim(Primitive::K))
+    let leaf = leaf_node(g);
+    stem_node(g, leaf)
+}
+
+fn s1_node(g: &mut Graph) -> NodeId {
+    let leaf = leaf_node(g);
+    let kk = fork_node(g, leaf, leaf);          // Δ Δ Δ
+    let stem = stem_node(g, kk);                // Δ (Δ Δ Δ)
+    fork_node(g, stem, leaf)                    // Δ (Δ(ΔΔΔ)) Δ
+}
+
+fn i_node(g: &mut Graph) -> NodeId {
+    // I = S1 K K (reduces to a pure tree under triage rules)
+    let s1 = s1_node(g);
+    let k = k_node(g);
+    let app1 = g.add(Node::App { func: s1, args: smallvec::smallvec![k] });
+    let app2 = g.add(Node::App { func: app1, args: smallvec::smallvec![k] });
+    let mut ctx = EvalContext::default();
+    reduce(g, app2, &mut ctx)
 }
 
 fn s_node(g: &mut Graph) -> NodeId {
-    g.add(Node::Prim(Primitive::S))
+    // In this evaluator, the stem rule is the standard S (xz (yz)),
+    // and the canonical tree for S is s1_node's shape.
+    s1_node(g)
 }
 
 fn bexpr_k(g: &mut Graph, u: BExpr) -> BExpr {
@@ -37,7 +71,7 @@ fn bexpr_s(g: &mut Graph, u: BExpr, v: BExpr) -> BExpr {
 }
 
 fn bexpr_i(g: &mut Graph) -> BExpr {
-    BExpr::Const(g.add(Node::Prim(Primitive::I)))
+    BExpr::Const(i_node(g))
 }
 
 fn bexpr_occurs(name: &str, e: &BExpr) -> bool {

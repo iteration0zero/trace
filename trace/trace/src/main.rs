@@ -1,14 +1,13 @@
-use trace::arena::{Graph, NodeId, Node, Primitive};
+use trace::arena::{Graph, NodeId, Node};
 use trace::parser::{Parser, ParseResult};
 use trace::engine::{reduce, unparse, EvalContext};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use num_traits::ToPrimitive;
 
 use trace::inference::InferenceEngine;
 use trace::types::{TypeEnv, Type};
 
-use trace::learner::{evolve, SearchConfig};
+
 
 fn main() {
     println!("Trace REPL");
@@ -17,12 +16,21 @@ fn main() {
     let mut g = Graph::new();
     let mut env: HashMap<String, NodeId> = HashMap::new();
     let mut type_env = TypeEnv::new();
+    let mut typecheck_enabled = true;
 
     // Standard Library (Prelude)
     let prelude = [
-        ("k", "(n n)"),
-        ("s", "(n (n (k n)) n)"),
-        ("i", "(s k k)"),
+        // Pure tree combinators (factorable)
+        ("k_tree", "(n n)"),
+        ("s_tree", "(n (n (k_tree n)) n)"),
+        ("i_tree", "(s_tree k_tree k_tree)"),
+        // Standard names (all tree-based)
+        ("k", "k_tree"),
+        ("s", "s_tree"),
+        ("i", "i_tree"),
+        ("K", "k_tree"),
+        ("S", "s_tree"),
+        ("I", "i_tree"),
         // tree_book: self_apply = λ* w. w w = d{I} I, and d{x} = n (n x)
         ("self_apply", "(n (n i) i)"),
         ("true", "k"),
@@ -34,8 +42,8 @@ fn main() {
         // first/rest are now primitives
         ("d", "(fn x (n (n x)))"),
         // Fixpoint helpers from tree_book
-        ("self_apply", "(n (n i) i)"), // d{I}I
-        ("omega", "(d (k i) (d self_apply (k d)))"), // ω = d{K I}(d{self_apply}(K d))
+        // ω = λ* z. λ* f. f (z z f)
+        ("omega", "(fn z (fn f (f (z z f))))"),
         // wait{x,y} = d{I}(d{K y}(K x))
         ("wait", "(fn x (fn y (d i (d (k y) (k x)))))"),
         // wait1{x} = d{d{K(K x)}(d{d{K}(K△)}(K△))}(K(d{△KK}))
@@ -55,24 +63,87 @@ fn main() {
     // Library of learned/defined programs for curriculum learning
     let mut library: Vec<NodeId> = Vec::new();
 
+    // Polymorphic types for core tree combinators
+    let type_k = Type::Forall(
+        "A".into(),
+        Box::new(Type::Forall(
+            "B".into(),
+            Box::new(Type::Arrow(
+                Box::new(Type::Generic("A".into())),
+                Box::new(Type::Arrow(
+                    Box::new(Type::Generic("B".into())),
+                    Box::new(Type::Generic("A".into())),
+                )),
+            )),
+        )),
+    );
+    let type_i = Type::Forall(
+        "A".into(),
+        Box::new(Type::Arrow(
+            Box::new(Type::Generic("A".into())),
+            Box::new(Type::Generic("A".into())),
+        )),
+    );
+    let type_s = Type::Forall(
+        "A".into(),
+        Box::new(Type::Forall(
+            "B".into(),
+            Box::new(Type::Forall(
+                "C".into(),
+                Box::new(Type::Arrow(
+                    Box::new(Type::Arrow(
+                        Box::new(Type::Generic("A".into())),
+                        Box::new(Type::Arrow(
+                            Box::new(Type::Generic("B".into())),
+                            Box::new(Type::Generic("C".into())),
+                        )),
+                    )),
+                    Box::new(Type::Arrow(
+                        Box::new(Type::Arrow(
+                            Box::new(Type::Generic("A".into())),
+                            Box::new(Type::Generic("B".into())),
+                        )),
+                        Box::new(Type::Arrow(
+                            Box::new(Type::Generic("A".into())),
+                            Box::new(Type::Generic("C".into())),
+                        )),
+                    )),
+                )),
+            )),
+        )),
+    );
+
     println!("Loading standard library...");
     for (name, code) in prelude {
         let mut p = Parser::new(code);
          if let Ok(ParseResult::Term(node)) = p.parse_toplevel(&mut g, Some(&env)) {
              // Verify type
              let mut engine = InferenceEngine::new();
-             if let Ok(ty) = engine.infer(&g, node, &type_env) {
-                 type_env.vars.insert(name.to_string(), ty);
-             }
              
              let mut ctx = EvalContext::default();
              let reduced = reduce(&mut g, node, &mut ctx);
              env.insert(name.to_string(), reduced);
+
+             // Install special polymorphic types for core combinators
+             if name == "k_tree" {
+                 type_env.specials.insert(reduced.0, type_k.clone());
+                 type_env.vars.insert(name.to_string(), type_k.clone());
+             } else if name == "i_tree" {
+                 type_env.specials.insert(reduced.0, type_i.clone());
+                 type_env.vars.insert(name.to_string(), type_i.clone());
+             } else if name == "s_tree" {
+                 type_env.specials.insert(reduced.0, type_s.clone());
+                 type_env.vars.insert(name.to_string(), type_s.clone());
+             } else {
+                 if let Ok(ty) = engine.infer(&g, reduced, &type_env) {
+                     type_env.vars.insert(name.to_string(), ty);
+                 }
+             }
              
              // Add valid functions to library
              library.push(reduced);
          } else {
-             println!("Failed to load {}", name);
+            println!("Failed to load {}", name);
          }
     }
 
@@ -136,6 +207,18 @@ fn main() {
             continue;
         }
         
+        // Handle typecheck toggle
+        if trimmed == "(typecheck off)" {
+            typecheck_enabled = false;
+            println!("Typecheck disabled.");
+            continue;
+        }
+        if trimmed == "(typecheck on)" {
+            typecheck_enabled = true;
+            println!("Typecheck enabled.");
+            continue;
+        }
+
         // Handle (learn-from ...)
         if trimmed.starts_with("(learn-from") {
              handle_learn_from_command(trimmed, &mut g, &mut env, &mut library);
@@ -153,11 +236,12 @@ fn main() {
             Ok(res) => {
                 match res {
                     ParseResult::Term(node) => {
-                        // Infer Type
-                        let mut engine = InferenceEngine::new();
-                        match engine.infer(&g, node, &type_env) {
-                            Ok(ty) => println!(" : {:?}", ty),
-                            Err(e) => println!("Type Error: {}", e),
+                        if typecheck_enabled {
+                            let mut engine = InferenceEngine::new();
+                            match engine.infer(&g, node, &type_env) {
+                                Ok(ty) => println!(" : {:?}", ty),
+                                Err(e) => println!("Type Error: {}", e),
+                            }
                         }
                         
                         let mut ctx = EvalContext::default();
@@ -168,14 +252,15 @@ fn main() {
                         println!("= {}", unparse(&g, result));
                     }
                     ParseResult::Def(name, node) => {
-                         // Infer Type
-                         let mut engine = InferenceEngine::new();
-                         match engine.infer(&g, node, &type_env) {
-                             Ok(ty) => {
-                                 type_env.vars.insert(name.clone(), ty.clone());
-                                 println!(" : {:?}", ty);
-                             },
-                             Err(e) => println!("Type Error: {}", e),
+                         if typecheck_enabled {
+                             let mut engine = InferenceEngine::new();
+                             match engine.infer(&g, node, &type_env) {
+                                 Ok(ty) => {
+                                     type_env.vars.insert(name.clone(), ty.clone());
+                                     println!(" : {:?}", ty);
+                                 },
+                                 Err(e) => println!("Type Error: {}", e),
+                             }
                          }
                          
                          let mut ctx = EvalContext::default();
@@ -236,52 +321,73 @@ fn handle_learn_from_command(
         return;
     };
     
-    // Parse epochs from rest (if any)
-    let epochs: usize = rest.parse().unwrap_or(100);
+    // Parse epochs and optional support cap from rest
+    let mut nums: Vec<usize> = Vec::new();
+    for tok in rest.split_whitespace() {
+        if let Ok(n) = tok.parse() {
+            nums.push(n);
+        }
+    }
+    let epochs: usize = nums.get(0).cloned().unwrap_or(100);
+    let support_cap: Option<usize> = nums.get(1).cloned();
     
     // Now parse the examples list content (without outer parens)
     let examples_content = examples_str.trim_start_matches('(').trim_end_matches(')').trim();
-    
-    // Parse each example pair: (input output)
-    let mut examples = Vec::new();
-    let mut p = Parser::new(examples_content);
-    let mut ctx = EvalContext::default();
-    
-    while p.has_more() {
-        // Each example is a parenthesized pair (input output)
-        if let Ok(ParseResult::Term(pair_node)) = p.parse_toplevel(g, Some(env)) {
-            // pair_node is compiled as App(input, output) in Triage syntax
-            // We need to:
-            // 1. Look at the App structure (unreduced)
-            // 2. Extract the two parts
-            
-            // Actually, let's use a simpler approach: parse TWO consecutive terms
-            // and treat them as (input, output) - this matches how (a b) is parsed
-            
-            // The pair_node from parse is already App(input, output)
-            // But after compilation, it might have been reduced
-            // Let's peek at the node structure
-            
-            match g.get(pair_node).clone() {
-                Node::App { func, args } if args.len() == 1 => {
-                    // Compiled as App(input, output)
-                    let in_val = reduce(g, func, &mut ctx);
-                    let out_val = reduce(g, args[0], &mut ctx);
-                    examples.push((in_val, out_val));
+
+    // Split into top-level parenthesized pairs to avoid App/Fork canonicalization
+    let mut pairs: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut start: Option<usize> = None;
+    for (i, c) in examples_content.char_indices() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    start = Some(i);
                 }
-                Node::Fork(left, right) => {
-                    // Might have been reduced to Fork
-                    let in_val = reduce(g, left, &mut ctx);
-                    let out_val = reduce(g, right, &mut ctx);
-                    examples.push((in_val, out_val));
-                }
-                _ => {
-                    println!("Warning: Skipping malformed example pair");
+                depth += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = start.take() {
+                        pairs.push(examples_content[s..=i].to_string());
+                    }
                 }
             }
-        } else {
-            break;
+            _ => {}
         }
+    }
+
+    // Parse each example pair: (input output) by parsing two terms inside
+    let mut examples = Vec::new();
+    let mut ctx = EvalContext::default();
+    for pair in pairs {
+        let mut inner = pair.trim();
+        if let Some(stripped) = inner.strip_prefix('(') {
+            inner = stripped;
+        }
+        if let Some(stripped) = inner.strip_suffix(')') {
+            inner = stripped;
+        }
+        let inner = inner.trim();
+        let mut p = Parser::new(inner);
+        let in_term = match p.parse_toplevel(g, Some(env)) {
+            Ok(ParseResult::Term(t)) => t,
+            _ => {
+                println!("Warning: Skipping malformed example pair: {}", inner);
+                continue;
+            }
+        };
+        let out_term = match p.parse_toplevel(g, Some(env)) {
+            Ok(ParseResult::Term(t)) => t,
+            _ => {
+                println!("Warning: Skipping malformed example pair: {}", inner);
+                continue;
+            }
+        };
+        let in_val = reduce(g, in_term, &mut ctx);
+        let out_val = reduce(g, out_term, &mut ctx);
+        examples.push((in_val, out_val));
     }
     
     if examples.is_empty() {
@@ -295,6 +401,15 @@ fn handle_learn_from_command(
     // Use IGTC synthesizer
     let mut config = trace::learner::IgtcConfig::default();
     config.max_iterations = epochs;
+    config.verbose = true;
+    config.log_every = 1;
+    config.debug_best_io = true;
+    if let Some(cap) = support_cap {
+        config.max_support_size = cap;
+    }
+    config.use_library_edits = true;
+    config.verbose = true;
+    config.log_every = 1;
     // Keep other defaults which are now tuned (LR=0.01, support=500, edits=15)
     
     if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
@@ -350,7 +465,14 @@ fn handle_learn_self_command(
         return;
     };
 
-    let epochs: usize = rest.parse().unwrap_or(100);
+    let mut nums: Vec<usize> = Vec::new();
+    for tok in rest.split_whitespace() {
+        if let Ok(n) = tok.parse() {
+            nums.push(n);
+        }
+    }
+    let epochs: usize = nums.get(0).cloned().unwrap_or(100);
+    let support_cap: Option<usize> = nums.get(1).cloned();
     let list_content = list_str.trim_start_matches('(').trim_end_matches(')').trim();
 
     let mut examples = Vec::new();
@@ -384,6 +506,13 @@ fn handle_learn_self_command(
 
     let mut config = trace::learner::IgtcConfig::default();
     config.max_iterations = epochs;
+    config.verbose = true;
+    config.log_every = 1;
+    config.debug_best_io = true;
+    if let Some(cap) = support_cap {
+        config.max_support_size = cap;
+    }
+    config.use_library_edits = true;
 
     if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
         println!("Success! Learned Node: {}", unparse(g, learned_node));

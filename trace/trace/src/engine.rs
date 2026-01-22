@@ -1,7 +1,7 @@
 
 use crate::arena::{Graph, Node, NodeId, Primitive};
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::{Zero, Signed};
+use num_traits::Zero;
 use smallvec::SmallVec;
 use crate::trace::{ExecutionTrace, RuleId, Branch};
 
@@ -75,8 +75,8 @@ pub fn reduce(g: &mut Graph, id: NodeId, ctx: &mut EvalContext) -> NodeId {
         curr = g.resolve(curr); // Always resolve first
         curr = g.resolve(curr); // Always resolve first
         if !reduce_step(g, curr, ctx) {
-            if let Some(trace) = &mut ctx.igtc_trace {
-                trace.set_result(curr);
+            if let Some(_trace) = &mut ctx.igtc_trace {
+                // Result recorded elsewhere via trace; nothing to do here for now.
             }
             return curr;
         }
@@ -197,6 +197,14 @@ fn attempt_reduction(
         Node::Stem(p) => {
             if args.len() >= 2 {
                 triage_reduce(g, root, p, args[0], args[1], &args[2..], ctx)
+            } else if args.len() == 1 {
+                // Absorption rule (triage 0b): (Δ p) a -> Δ p a
+                let fork = g.add(Node::Fork(p, args[0]));
+                g.replace(root, Node::Ind(fork));
+                if let Some(trace) = &mut ctx.igtc_trace {
+                    trace.record(RuleId::App, head, args.to_vec(), fork);
+                }
+                true
             } else {
                 false
             }
@@ -242,7 +250,7 @@ fn attempt_reduction(
             g.replace(root, Node::Ind(new_id));
             
             // This is effectively re-association, conceptually App rule
-             if let Some(trace) = &mut ctx.igtc_trace {
+             if let Some(_trace) = &mut ctx.igtc_trace {
                 // Not exactly App rule in the sense of absorption, but structural. 
                 // Let's record it if needed, but usually App rule is for Leaf/Stem absorption.
                 // trace.record(RuleId::App, head, args.to_vec(), new_id);
@@ -330,13 +338,8 @@ fn triage_reduce(
         g.replace(root, Node::Ind(result));
         
         if let (Some(trace), Some(rule)) = (&mut ctx.igtc_trace, rule_id) {
-            // Note: redex is difficult to pinpoint here because triage_reduce is called with disparate args.
-            // But usually 'root' is the application that triggered this.
-            // Or rather, the combinator logic triggered by p.
-            // Let's use 'p' as redex proxy or root?
-            // Trace expects: rule, redex, args, result
-            // 'root' is the NodeId being replaced.
-            trace.record(rule, root, captured_args, result);
+            // Use the combinator node `p` as redex so blame maps back to program structure.
+            trace.record(rule, p, captured_args, result);
         }
         
         true
@@ -371,7 +374,7 @@ fn reduce_whnf_depth(g: &mut Graph, id: NodeId, depth: usize) -> NodeId {
             return curr;
         }
         
-        let next = g.resolve(curr);
+    let _next = g.resolve(curr);
         let next = g.resolve(curr);
         match g.get(next) {
              Node::App {..} => { /* Continue */ },

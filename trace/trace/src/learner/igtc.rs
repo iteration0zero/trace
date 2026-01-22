@@ -4,9 +4,10 @@
 //! over a superposition of discrete Triage Calculus programs.
 
 use crate::arena::{Graph, Node, NodeId};
-use crate::engine::{reduce, EvalContext};
+use crate::engine::{reduce, unparse, EvalContext};
 use crate::learner::loss::tree_edit_distance;
 use crate::trace::ExecutionTrace;
+use rand::Rng;
 use std::collections::HashMap;
 use smallvec::SmallVec;
 
@@ -25,6 +26,16 @@ pub struct IgtcConfig {
     pub max_eval_steps: usize,
     /// Number of neighbor edits per iteration
     pub num_edits: usize,
+    /// Print detailed progress
+    pub verbose: bool,
+    /// Log frequency (iterations)
+    pub log_every: usize,
+    /// Print best candidate output vs expected each log
+    pub debug_best_io: bool,
+    /// Keep newly created candidates for N prune cycles
+    pub keep_new_iters: usize,
+    /// Allow using curriculum/library nodes as direct replacement edits
+    pub use_library_edits: bool,
 }
 
 impl Default for IgtcConfig {
@@ -32,10 +43,15 @@ impl Default for IgtcConfig {
         Self {
             max_iterations: 100,
             learning_rate: 0.01,        // Very slow learning rate
-            max_support_size: 500,      // Much larger support
+            max_support_size: 2000,       // Default cap; override per learn-from if needed
             min_weight: 0.0001,         // Very slow pruning (0.01%)
             max_eval_steps: 250,        // Base multiplier; actual budget scales with term size
-            num_edits: 15,              // More edits per iteration
+            num_edits: 100,              // More edits per iteration
+            verbose: false,
+            log_every: 10,
+            debug_best_io: false,
+            keep_new_iters: 10,
+            use_library_edits: true,
         }
     }
 }
@@ -51,6 +67,8 @@ pub struct Candidate {
     pub loss: Option<f64>,
     /// Blame map from last evaluation
     pub blame: Option<HashMap<NodeId, f64>>,
+    /// Age in iterations (used to protect new candidates from pruning)
+    pub age: usize,
 }
 
 impl Candidate {
@@ -60,6 +78,7 @@ impl Candidate {
             weight: 1.0,
             loss: None,
             blame: None,
+            age: 0,
         }
     }
     
@@ -69,6 +88,7 @@ impl Candidate {
             weight,
             loss: None,
             blame: None,
+            age: 0,
         }
     }
 }
@@ -83,6 +103,8 @@ pub struct IgtcSynthesizer {
     pub examples: Vec<(NodeId, NodeId)>,
     /// Best program found so far
     pub best: Option<(NodeId, f64)>,
+    /// Allowed replacement programs (from curriculum library)
+    pub allowed_replacements: Vec<NodeId>,
 }
 
 impl IgtcSynthesizer {
@@ -92,7 +114,13 @@ impl IgtcSynthesizer {
             support: Vec::new(),
             examples: Vec::new(),
             best: None,
+            allowed_replacements: Vec::new(),
         }
+    }
+
+    /// Restrict edit replacements to these programs (curriculum/library)
+    pub fn set_allowed_replacements(&mut self, replacements: Vec<NodeId>) {
+        self.allowed_replacements = replacements;
     }
     
     /// Add a training example
@@ -113,6 +141,14 @@ impl IgtcSynthesizer {
     /// Run the synthesis loop
     pub fn synthesize(&mut self, g: &mut Graph) -> Option<NodeId> {
         for iteration in 0..self.config.max_iterations {
+            if iteration > 0 {
+                self.increment_ages();
+            }
+            let do_log = self.config.verbose && (self.config.log_every > 0) && (iteration % self.config.log_every == 0);
+            if do_log {
+                println!("IGTC Iteration {}:", iteration);
+                println!("  Phase 1/5: evaluate");
+            }
             // Phase 1: Evaluate all candidates
             self.evaluate_all(g);
             
@@ -124,19 +160,89 @@ impl IgtcSynthesizer {
                 }
             }
             
+            if do_log {
+                let best_loss = self.best.as_ref().map(|b| b.1).unwrap_or(f64::INFINITY);
+                let avg_loss = self.support.iter().filter_map(|c| c.loss).sum::<f64>()
+                    / (self.support.len().max(1) as f64);
+                println!("  Eval summary: support={}, best_loss={:.4}, avg_loss={:.4}", 
+                         self.support.len(), best_loss, avg_loss);
+                if self.config.debug_best_io {
+                    if let Some(best) = self.support.iter().filter(|c| c.loss == Some(best_loss)).next() {
+                        println!("  Best program (NF): {}", unparse(g, best.program));
+                        let mut total = 0.0;
+                        for (idx, (inp, expected)) in self.examples.iter().enumerate() {
+                            let (loss, actual_str, expected_str) = eval_candidate_loss_and_outputs(
+                                g,
+                                best.program,
+                                *inp,
+                                *expected,
+                                self.config.max_eval_steps,
+                            );
+                            total += loss;
+                            let input_str = unparse(g, *inp);
+                            println!("  Example {} loss={:.4}", idx, loss);
+                            println!("    Input:        {}", input_str);
+                            println!("    Actual (NF):   {}", actual_str);
+                            println!("    Expected (NF): {}", expected_str);
+                        }
+                        println!("  Sum loss (debug): {:.4}", total);
+                        // Print top blamed program paths for this best candidate
+                        let path_map = collect_paths_map(g, best.program);
+                        let mut blamed: Vec<(Vec<u8>, f64)> = Vec::new();
+                        if let Some(blame) = &best.blame {
+                            for (&node, &b) in blame.iter() {
+                                if let Some(paths) = path_map.get(&node) {
+                                    let split = b / paths.len().max(1) as f64;
+                                    for path in paths {
+                                        blamed.push((path.clone(), split));
+                                    }
+                                }
+                            }
+                            blamed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                            for (i, (path, b)) in blamed.iter().take(5).enumerate() {
+                                if let Some(node) = node_at_path(g, best.program, path) {
+                                    let node_str = unparse(g, node);
+                                    println!("  Blame {}: {:.4} at path {:?} -> {}", i, b, path, node_str);
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("  Phase 2/5: update weights");
+            }
             // Phase 2: Update weights (exponentiated gradient)
             self.update_weights();
             
+            if do_log {
+                println!("  Phase 3/5: prune");
+            }
             // Phase 3: Prune low-weight candidates
             self.prune();
             
+            if do_log {
+                println!("  Phase 4/5: expand support");
+            }
             // Phase 4: Expand support with edits guided by blame
             self.expand_support(g);
             
+            if do_log {
+                println!("  Phase 5/5: normalize");
+            }
             // Normalize weights
             self.normalize_weights();
+            // Enforce hard support cap after expansion
+            self.cap_support();
+            if do_log {
+                let best_loss = self.best.as_ref().map(|b| b.1).unwrap_or(f64::INFINITY);
+                println!(
+                    "  Summary: support={}, cap={}, best_loss={:.4}",
+                    self.support.len(),
+                    self.config.max_support_size,
+                    best_loss
+                );
+            }
             
-            if iteration % 10 == 0 {
+            if !self.config.verbose && iteration % 10 == 0 {
                 let best_loss = self.best.as_ref().map(|b| b.1).unwrap_or(f64::INFINITY);
                 println!("IGTC Iteration {}: Support={}, BestLoss={:.4}", 
                          iteration, self.support.len(), best_loss);
@@ -167,8 +273,12 @@ impl IgtcSynthesizer {
                     for (node, b) in blame_map {
                         *combined_blame.entry(node).or_insert(0.0) += b;
                     }
-                    *combined_blame.entry(candidate.program).or_insert(0.0) += loss;
                 }
+            }
+
+            if combined_blame.is_empty() && total_loss > 0.0 {
+                // Fallback: blame the whole program if we couldn't attribute structure.
+                *combined_blame.entry(candidate.program).or_insert(0.0) += total_loss;
             }
             
             candidate.loss = Some(total_loss);
@@ -213,7 +323,11 @@ impl IgtcSynthesizer {
         // Prune low-weight candidates, but keep at least one with best loss
         let mut kept_best = false;
         let min_weight = self.config.min_weight;
+        let keep_new_iters = self.config.keep_new_iters;
         self.support.retain(|c| {
+            if c.age <= keep_new_iters {
+                return true;
+            }
             if c.weight >= min_weight {
                 return true;
             }
@@ -229,6 +343,40 @@ impl IgtcSynthesizer {
         if self.support.len() > self.config.max_support_size {
             self.support.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
             self.support.truncate(self.config.max_support_size);
+        }
+    }
+
+    fn cap_support(&mut self) {
+        if self.support.len() > self.config.max_support_size {
+            let keep_new_iters = self.config.keep_new_iters;
+            let mut young: Vec<Candidate> = Vec::new();
+            let mut rest: Vec<Candidate> = Vec::new();
+            for c in self.support.drain(..) {
+                if c.age <= keep_new_iters {
+                    young.push(c);
+                } else {
+                    rest.push(c);
+                }
+            }
+
+            if young.len() >= self.config.max_support_size {
+                young.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
+                young.truncate(self.config.max_support_size);
+                self.support = young;
+                return;
+            }
+
+            rest.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
+            let needed = self.config.max_support_size - young.len();
+            rest.truncate(needed);
+            young.extend(rest);
+            self.support = young;
+        }
+    }
+
+    fn increment_ages(&mut self) {
+        for c in &mut self.support {
+            c.age = c.age.saturating_add(1);
         }
     }
     
@@ -260,9 +408,87 @@ impl IgtcSynthesizer {
                 
                 // Sort by blame magnitude
                 blamed_paths.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                
-                for (path, _) in blamed_paths.iter().take(self.config.num_edits) {
-                    let edits = self.generate_edits(g, candidate.program, path);
+
+                // Use blame magnitude to choose edit targets (and probabilistically go deeper)
+                let total_blame: f64 = blamed_paths.iter().map(|(_, b)| *b).sum();
+                let mut rng = rand::thread_rng();
+                let mut edit_targets: Vec<Vec<u8>> = Vec::new();
+                let mut seen_targets: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+                let max_ancestor_depth = 2;
+
+                for (path, b) in blamed_paths.iter() {
+                    if edit_targets.len() >= self.config.num_edits {
+                        break;
+                    }
+                    // Always include the base path
+                    if seen_targets.insert(path.clone()) {
+                        edit_targets.push(path.clone());
+                    }
+
+                    // Also include a few ancestors so we can change structure higher up
+                    if !path.is_empty() {
+                        let mut anc = path.clone();
+                        for _ in 0..max_ancestor_depth {
+                            if anc.is_empty() { break; }
+                            anc.pop();
+                            if seen_targets.insert(anc.clone()) {
+                                edit_targets.push(anc.clone());
+                                if edit_targets.len() >= self.config.num_edits {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+
+                    if total_blame > 0.0 {
+                        let share = (b / total_blame).clamp(0.0, 1.0);
+                        // Add child edits with probability proportional to blame share
+                        if edit_targets.len() < self.config.num_edits {
+                            if let Some(node) = node_at_path(g, candidate.program, path) {
+                                match g.get(g.resolve(node)) {
+                                    Node::Stem(_) => {
+                                        if rng.gen::<f64>() < share {
+                                            let mut child = path.clone();
+                                            child.push(0);
+                                            if seen_targets.insert(child.clone()) {
+                                                edit_targets.push(child);
+                                            }
+                                        }
+                                    }
+                                    Node::Fork(_, _) => {
+                                        if rng.gen::<f64>() < share {
+                                            let mut left = path.clone();
+                                            left.push(0);
+                                            if seen_targets.insert(left.clone()) {
+                                                edit_targets.push(left);
+                                            }
+                                        }
+                                        if edit_targets.len() < self.config.num_edits && rng.gen::<f64>() < share {
+                                            let mut right = path.clone();
+                                            right.push(1);
+                                            if seen_targets.insert(right.clone()) {
+                                                edit_targets.push(right);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Always allow editing the root when there's blame, to enable global structural changes
+                if !blamed_paths.is_empty() && edit_targets.len() < self.config.num_edits {
+                    if seen_targets.insert(Vec::new()) {
+                        edit_targets.push(Vec::new());
+                    }
+                }
+
+                // Generate edits for chosen targets
+                for path in edit_targets {
+                    let edits = self.generate_edits(g, candidate.program, &path);
                     for edited in edits {
                         if seen.insert(edited) {
                             new_candidates.push(Candidate::with_weight(
@@ -279,8 +505,8 @@ impl IgtcSynthesizer {
     }
     
     /// Generate structural edits at a specific node
-    fn generate_edits(&self, g: &mut Graph, program: NodeId, path: &[u8]) -> Vec<NodeId> {
-        let mut edits = Vec::new();
+fn generate_edits(&self, g: &mut Graph, program: NodeId, path: &[u8]) -> Vec<NodeId> {
+    let mut edits = Vec::new();
         
         let target = match node_at_path(g, program, path) {
             Some(t) => t,
@@ -288,103 +514,48 @@ impl IgtcSynthesizer {
         };
         let target_node = g.get(g.resolve(target)).clone();
         let leaf = g.add(Node::Leaf);
-        let k = g.add(Node::Fork(leaf, leaf));  // K combinator
+        let fork_leaf_leaf = g.add(Node::Fork(leaf, leaf));
         let mut replacements: Vec<NodeId> = Vec::new();
         
         match target_node {
             Node::Leaf => {
-                // Wrap in stem
-                replacements.push(g.add(Node::Stem(target)));
-
-                // Wrap in fork (both positions)
-                replacements.push(g.add(Node::Fork(target, leaf)));
-                replacements.push(g.add(Node::Fork(leaf, target)));
-                replacements.push(g.add(Node::Fork(target, target)));
-                
-                // Create K (useful for first/second)
-                replacements.push(k);
-                
-                // Triage with leaf in different positions
-                replacements.push(g.add(Node::Fork(k, target)));  // triage{n,n,target}
-                let tri1 = g.add(Node::Fork(target, leaf));
-                replacements.push(g.add(Node::Fork(tri1, leaf)));
-                let tri2 = g.add(Node::Fork(leaf, target));
-                replacements.push(g.add(Node::Fork(tri2, leaf)));
-                let tri3 = g.add(Node::Fork(leaf, leaf));
-                replacements.push(g.add(Node::Fork(tri3, target)));
-                
-                // Self-application (encourages fixpoint shapes)
-                replacements.push(g.add(Node::App { func: target, args: smallvec::smallvec![target] }));
+                // Simple growth: leaf -> stem(leaf) or fork(leaf,leaf)
+                replacements.push(g.add(Node::Stem(leaf)));
+                replacements.push(fork_leaf_leaf);
             }
             Node::Stem(child) => {
-                // Unwrap
-                replacements.push(child);
-                
-                // Convert to fork with child in different positions
+                // Simple edits: stem -> fork(leaf, leaf) or fork(child, leaf) / fork(leaf, child)
+                replacements.push(fork_leaf_leaf);
                 replacements.push(g.add(Node::Fork(child, leaf)));
                 replacements.push(g.add(Node::Fork(leaf, child)));
+                // Allow duplication of the child (enables self-application patterns)
                 replacements.push(g.add(Node::Fork(child, child)));
-                
-                // Double stem
-                replacements.push(g.add(Node::Stem(target)));
-                
-                // Triage with stem child
-                replacements.push(g.add(Node::Fork(k, child)));
-                let tri1 = g.add(Node::Fork(child, leaf));
-                replacements.push(g.add(Node::Fork(tri1, leaf)));
-                let tri2 = g.add(Node::Fork(leaf, child));
-                replacements.push(g.add(Node::Fork(tri2, leaf)));
-                let tri3 = g.add(Node::Fork(leaf, leaf));
-                replacements.push(g.add(Node::Fork(tri3, child)));
-                
-                // Self-application
-                replacements.push(g.add(Node::App { func: target, args: smallvec::smallvec![target] }));
             }
             Node::Fork(left, right) => {
-                // Project left or right
-                replacements.push(left);
-                replacements.push(right);
-                
-                // Wrap in stem
-                replacements.push(g.add(Node::Stem(target)));
-                
+                // Simple prune: fork -> leaf
+                replacements.push(leaf);
+                // Simple focus: fork -> stem(left/right)
+                replacements.push(g.add(Node::Stem(left)));
+                replacements.push(g.add(Node::Stem(right)));
                 // Swap branches
                 replacements.push(g.add(Node::Fork(right, left)));
-                replacements.push(g.add(Node::Fork(target, target)));
-                
-                // Nest as triage
-                replacements.push(g.add(Node::Fork(target, leaf)));  // triage{left, right, leaf}
-                replacements.push(g.add(Node::Fork(target, k)));  // triage{left, right, K}
-                let tri1 = g.add(Node::Fork(target, leaf));
-                replacements.push(g.add(Node::Fork(tri1, leaf)));
-                let tri2 = g.add(Node::Fork(leaf, target));
-                replacements.push(g.add(Node::Fork(tri2, leaf)));
-                let tri3 = g.add(Node::Fork(leaf, leaf));
-                replacements.push(g.add(Node::Fork(tri3, target)));
-                
-                // Use K to extract components
-                replacements.push(g.add(Node::Fork(left, leaf)));
-                replacements.push(g.add(Node::Fork(leaf, right)));
-                
-                // Deeper nesting: Fork(Fork(left,right), leaf) = common triage pattern
-                let inner_fork = g.add(Node::Fork(left, right));
-                replacements.push(g.add(Node::Fork(inner_fork, leaf)));
-                
-                // Self-application
-                replacements.push(g.add(Node::App { func: target, args: smallvec::smallvec![target] }));
+                // Allow duplicating one branch
+                replacements.push(g.add(Node::Fork(left, left)));
+                replacements.push(g.add(Node::Fork(right, right)));
             }
             _ => {}
         }
-        
-        // Also generate some universal combinators that might help
-        // These are independent of the target
-        let stem_k = g.add(Node::Stem(k));
-        replacements.push(stem_k);
-        
-        // K' = Fork(Leaf, Id) pattern for "rest"
-        let stem_leaf = g.add(Node::Stem(leaf));
-        let k_prime = g.add(Node::Fork(leaf, stem_leaf));
-        replacements.push(k_prime);
+
+        // Generic wrappers: allow growing around the existing subtree
+        replacements.push(g.add(Node::Stem(target)));
+        replacements.push(g.add(Node::Fork(target, leaf)));
+        replacements.push(g.add(Node::Fork(leaf, target)));
+        replacements.push(g.add(Node::Fork(target, target)));
+
+        // Also allow replacements from curriculum/library only
+        for &rep in &self.allowed_replacements {
+            replacements.push(rep);
+        }
         
         for replacement in replacements {
             if replacement == target { continue; }
@@ -432,14 +603,26 @@ fn evaluate_candidate(
     ctx.igtc_trace = Some(&mut trace);
 
     let actual = reduce(&mut eval_g, applied, &mut ctx);
-    let loss = tree_edit_distance(&eval_g, actual, expected_eval) as f64;
+
+    // Normalize expected output before computing TED to avoid penalizing
+    // equivalent programs that differ only by reduction.
+    let mut expected_ctx = EvalContext::default();
+    let expected_size = estimate_size(&eval_g, expected_eval);
+    let mut expected_budget = max_steps.saturating_mul(expected_size.max(1));
+    if expected_budget > 200_000 {
+        expected_budget = 200_000;
+    }
+    expected_ctx.step_limit = expected_budget;
+    let expected_nf = reduce(&mut eval_g, expected_eval, &mut expected_ctx);
+
+    let loss = tree_edit_distance(&eval_g, actual, expected_nf) as f64;
 
     if loss == 0.0 {
         return (0.0, HashMap::new());
     }
 
     let mut seeds: Vec<(NodeId, f64)> = Vec::new();
-    seed_structural_blame(&eval_g, actual, expected_eval, loss, &mut seeds);
+    seed_structural_blame(&eval_g, actual, expected_nf, loss, &mut seeds);
     if seeds.is_empty() {
         seeds.push((actual, loss));
     }
@@ -455,6 +638,51 @@ fn evaluate_candidate(
     }
 
     (loss, blame_orig)
+}
+
+fn eval_candidate_loss_and_outputs(
+    g: &Graph,
+    program: NodeId,
+    input: NodeId,
+    expected: NodeId,
+    max_steps: usize,
+) -> (f64, String, String) {
+    let mut eval_g = Graph::new_uninterned();
+
+    let mut prog_memo = HashMap::new();
+    let prog_eval = clone_subtree(g, &mut eval_g, program, &mut prog_memo, None);
+
+    let mut input_memo = HashMap::new();
+    let input_eval = clone_subtree(g, &mut eval_g, input, &mut input_memo, None);
+
+    let mut expected_memo = HashMap::new();
+    let expected_eval = clone_subtree(g, &mut eval_g, expected, &mut expected_memo, None);
+
+    let applied = eval_g.add(Node::App {
+        func: prog_eval,
+        args: smallvec::smallvec![input_eval],
+    });
+
+    let mut ctx = EvalContext::default();
+    let size = estimate_size(&eval_g, applied);
+    let mut budget = max_steps.saturating_mul(size.max(1));
+    if budget > 200_000 {
+        budget = 200_000;
+    }
+    ctx.step_limit = budget;
+    let actual = reduce(&mut eval_g, applied, &mut ctx);
+
+    let mut expected_ctx = EvalContext::default();
+    let expected_size = estimate_size(&eval_g, expected_eval);
+    let mut expected_budget = max_steps.saturating_mul(expected_size.max(1));
+    if expected_budget > 200_000 {
+        expected_budget = 200_000;
+    }
+    expected_ctx.step_limit = expected_budget;
+    let expected_nf = reduce(&mut eval_g, expected_eval, &mut expected_ctx);
+
+    let loss = tree_edit_distance(&eval_g, actual, expected_nf) as f64;
+    (loss, unparse(&eval_g, actual), unparse(&eval_g, expected_nf))
 }
 
 fn clone_subtree(
@@ -569,6 +797,9 @@ fn seed_structural_blame(
             let el = exact_label(&en);
             if al != el {
                 out.push((a, weight));
+            } else {
+                // Exact labels match; no blame to assign at this node.
+                // (Do not stop early for matching shapes; handled above by recursion.)
             }
         }
     }
@@ -874,15 +1105,22 @@ pub fn synthesize_with_seeds(
     let stem_kprime = g.add(Node::Stem(k_prime));
     seeds.push(stem_kprime);
     
-    // Add external seeds (dedup)
-    for &s in extra_seeds {
-        seeds.push(s);
+    // Add external seeds (dedup) only if library edits are enabled
+    if synth.config.use_library_edits {
+        for &s in extra_seeds {
+            seeds.push(s);
+        }
     }
     // Dedup
     let mut seen = std::collections::HashSet::new();
     seeds.retain(|id| seen.insert(*id));
     
     synth.seed(seeds);
+    if synth.config.use_library_edits {
+        synth.set_allowed_replacements(extra_seeds.to_vec());
+    } else {
+        synth.set_allowed_replacements(Vec::new());
+    }
     
     synth.synthesize(g)
 }

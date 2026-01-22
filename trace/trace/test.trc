@@ -7,8 +7,7 @@
 
 ; Fixpoint building blocks from tree_book
 ; d{x} = n (n x) is in prelude as d; self_apply = d{I}I is in prelude as self_apply
-; ω = λ* z. λ* f. f (z z f) = d{K I}(d{self_apply}(K d))
-(def omega (d (k i) (d self_apply (k d))))
+; ω is in prelude as: (fn z (fn f (f (z z f))))
 
 (id x)
 
@@ -51,34 +50,48 @@
 ; Part 1: self-application only (w-part of Z)
 (learn-self (i (s k k)) 1500)
 
-; Part 2: omega curriculum (ω with stable f = K I)
+; Part 2: omega curriculum (learn ω without mentioning it)
+; Learn function z ↦ λ* f. f (z z f)
 (learn-from (
-  (((omega (k i)) i) i)
-  (((omega (k i)) (cons 1.0 n)) (cons 1.0 n))
+  (n (fn f (f (n n f))))
+  ((n n) (fn f (f ((n n) (n n) f))))
+  ((n n n) (fn f (f ((n n n) (n n n) f))))
+  ((n (n n) (n n n)) (fn f (f ((n (n n) (n n n)) (n (n n) (n n n)) f))))
 ) 2000)
 
 ; Part 3: wait1 delays one argument
+; Learn x ↦ λ* y. λ* z. x y z
 (learn-from (
-  ((((wait1 k) (cons 1.0 n)) (cons 2.0 n)) (cons 1.0 n))
-  ((((wait1 k) (cons 3.0 n)) (cons 4.0 n)) (cons 3.0 n))
+  (k (fn y (fn z (k y z))))
+  (i (fn y (fn z (i y z))))
+  ((k i) (fn y (fn z ((k i) y z))))
 ) 2000)
 
 ; Part 4: wait2 delays two arguments
+; Learn x ↦ λ* y. λ* z. λ* w. x y z w
 (learn-from (
-  (((((wait2 k i) (cons 1.0 n)) (cons 2.0 n)) (cons 3.0 n)) (cons 2.0 n))
-  (((((wait2 k i) (cons 4.0 n)) (cons 5.0 n)) (cons 6.0 n)) (cons 5.0 n))
+  (k (fn y (fn z (fn w (k y z w)))))
+  (i (fn y (fn z (fn w (i y z w)))))
+  ((k i) (fn y (fn z (fn w ((k i) y z w)))))
 ) 2500)
 
 ; Part 5: swap flips argument order
+; Learn f ↦ λ* x. λ* y. f y x
 (learn-from (
-  ((((swap k) (cons 1.0 n)) (cons 2.0 n)) (cons 2.0 n))
-  ((((swap k) (cons 3.0 n)) (cons 4.0 n)) (cons 4.0 n))
+  ((fn x (fn y (n x y))) (fn y (fn x (n x y))))
+  ((fn x (fn y ((n n) x y))) (fn y (fn x ((n n) x y))))
+  ((fn x (fn y ((n n n) x y))) (fn y (fn x ((n n n) x y))))
+  ((fn x (fn y (k x y))) (fn y (fn x (k x y))))
+  ((fn x (fn y (i x y))) (fn y (fn x (i x y))))
+  ((fn x (fn y ((n (n n) n) x y))) (fn y (fn x ((n (n n) n) x y))))
 ) 2000)
 
-; Part 6: Z with stable f = K I
+; Part 6: Z with stable f = K g
+; For f = K g, Z f = g
 (learn-from (
-  (((Z (k i)) (cons 1.0 n)) (cons 1.0 n))
-  (((Z (k i)) (cons 2.0 n)) (cons 2.0 n))
+  ((k i) i)
+  ((k (k (cons 1.0 n))) (k (cons 1.0 n)))
+  ((k (k (cons 2.0 n))) (k (cons 2.0 n)))
 ) 3000)
 
 ; Reverse curriculum after Z-like stage

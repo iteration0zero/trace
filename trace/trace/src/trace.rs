@@ -129,72 +129,45 @@ impl ExecutionTrace {
             
             match event.rule {
                 RuleId::K => {
-                    // K discards the third arg (z). Blame goes to y (first arg).
-                    // 44yz → y: args[0] = y, args[1] = z
-                    if !event.args.is_empty() {
-                        *self.blame.entry(event.args[0]).or_insert(0.0) += result_blame;
-                        *source_blame.entry(event.args[0]).or_insert(0.0) += result_blame;
-                    }
-                    // z gets zero blame (discarded)
+                    // Focus blame on the combinator structure (redex) only.
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
                 RuleId::S => {
-                    // S duplicates z: xz(yz)
-                    // Both x and y get blame, z gets blame from both uses
-                    // args[0] = x, args[1] = y, args[2] = z
-                    if event.args.len() >= 3 {
-                        let split = result_blame / 2.0;
-                        *self.blame.entry(event.args[0]).or_insert(0.0) += split;
-                        *self.blame.entry(event.args[1]).or_insert(0.0) += split;
-                        // z gets full blame (used twice)
-                        *self.blame.entry(event.args[2]).or_insert(0.0) += result_blame;
-                        *source_blame.entry(event.args[0]).or_insert(0.0) += split;
-                        *source_blame.entry(event.args[1]).or_insert(0.0) += split;
-                        *source_blame.entry(event.args[2]).or_insert(0.0) += result_blame;
-                    }
+                    // Focus blame on the combinator structure (redex) only.
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
                 RuleId::TriageLeaf => {
-                    // 4(4wx)y4 → w: only w contributed
-                    // args[0] = w
-                    if !event.args.is_empty() {
-                        *self.blame.entry(event.args[0]).or_insert(0.0) += result_blame;
-                        *source_blame.entry(event.args[0]).or_insert(0.0) += result_blame;
-                    }
+                    // Focus blame on the combinator structure (redex) only.
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
                 RuleId::TriageStem => {
-                    // 4(4wx)y(4u) → xu: x and u contribute
-                    // args[0] = x, args[1] = u
-                    if event.args.len() >= 2 {
-                        let split = result_blame / 2.0;
-                        *self.blame.entry(event.args[0]).or_insert(0.0) += split;
-                        *self.blame.entry(event.args[1]).or_insert(0.0) += split;
-                        *source_blame.entry(event.args[0]).or_insert(0.0) += split;
-                        *source_blame.entry(event.args[1]).or_insert(0.0) += split;
-                    }
+                    // Focus blame on the combinator structure (redex) only.
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
                 RuleId::TriageFork => {
-                    // 4(4wx)y(4uv) → yuv: y, u, v contribute
-                    // args[0] = y, args[1] = u, args[2] = v
-                    if event.args.len() >= 3 {
-                        let split = result_blame / 3.0;
-                        for i in 0..3 {
-                            *self.blame.entry(event.args[i]).or_insert(0.0) += split;
-                            *source_blame.entry(event.args[i]).or_insert(0.0) += split;
-                        }
-                    }
+                    // Focus blame on the combinator structure (redex) only.
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
                 RuleId::App | RuleId::Prim => {
-                    // Pass blame to all args equally
-                    if !event.args.is_empty() {
-                        let split = result_blame / event.args.len() as f64;
-                        for arg in &event.args {
-                            *self.blame.entry(*arg).or_insert(0.0) += split;
-                            *source_blame.entry(*arg).or_insert(0.0) += split;
-                        }
-                    }
+                    // Blame only the redex (program structure), avoid pushing into inputs
+                    *self.blame.entry(event.redex).or_insert(0.0) += result_blame;
+                    *source_blame.entry(event.redex).or_insert(0.0) += result_blame;
                 }
             }
         }
-        
+        // Any remaining blame that never appeared as a result in the trace
+        // should still be attributed to its node (static structure).
+        for (node, b) in self.blame.iter() {
+            if *b > 0.0 {
+                *source_blame.entry(*node).or_insert(0.0) += *b;
+            }
+        }
+
         source_blame
     }
     

@@ -20,8 +20,6 @@ struct TedNode {
     leftmost: usize,
     /// Label: distinguishes leaf/stem/fork and primitive/value leaves
     label: u64,
-    /// Children indices (postorder)
-    children: Vec<usize>,
 }
 
 /// Flattens a Graph tree into postorder representation for TED
@@ -39,7 +37,6 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost: idx + 1, // 1-indexed
                 label: label_for_node(&Node::Leaf),
-                children: vec![],
             });
             idx
         }
@@ -50,19 +47,17 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost,
                 label: label_for_node(&Node::Stem(child)),
-                children: vec![child_idx],
             });
             idx
         }
         Node::Fork(left, right) => {
             let left_idx = flatten_recursive(g, left, out);
-            let right_idx = flatten_recursive(g, right, out);
+            let _right_idx = flatten_recursive(g, right, out);
             let idx = out.len();
             let leftmost = out[left_idx].leftmost;
             out.push(TedNode {
                 leftmost,
                 label: label_for_node(&Node::Fork(left, right)),
-                children: vec![left_idx, right_idx],
             });
             idx
         }
@@ -71,7 +66,6 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost: idx + 1,
                 label: label_for_node(&Node::Prim(p)),
-                children: vec![],
             });
             idx
         }
@@ -80,7 +74,6 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost: idx + 1,
                 label: label_for_node(&Node::Float(f)),
-                children: vec![],
             });
             idx
         }
@@ -89,7 +82,6 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost: idx + 1,
                 label: label_for_node(&Node::Handle(h)),
-                children: vec![],
             });
             idx
         }
@@ -98,7 +90,6 @@ fn flatten_recursive(g: &Graph, node: NodeId, out: &mut Vec<TedNode>) -> usize {
             out.push(TedNode {
                 leftmost: idx + 1,
                 label: label_for_node_app(),
-                children: vec![],
             });
             idx
         }

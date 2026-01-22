@@ -1,9 +1,8 @@
 use super::genome::Gene;
 use super::soft::{SoftGenome, argmax};
-use crate::arena::{Graph, NodeId, Node, Primitive};
-use crate::engine::{reduce, EvalContext, encode_int, make_tag};
+use crate::arena::{Graph, NodeId, Node};
+use crate::engine::{reduce, EvalContext};
 use crate::sensitivity::compute_sensitivity;
-use std::collections::HashMap;
 
 pub struct SearchConfig {
     pub max_depth: usize,
@@ -98,8 +97,8 @@ fn calculate_loss(g: &Graph, actual: NodeId, expected: NodeId) -> f64 {
     if actual == expected { return 0.0; }
     
     // Check values
-    let n1 = g.get(g.resolve(actual));
-    let n2 = g.get(g.resolve(expected));
+    let _n1 = g.get(g.resolve(actual));
+    let _n2 = g.get(g.resolve(expected));
     
     // Tagged Ints comparison
     // We need to unwrap data?
