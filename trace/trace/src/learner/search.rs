@@ -57,6 +57,7 @@ pub fn evolve_with_graph(
                 depth: 0,
                 depth_limit: 1000,
                 trace: Some(&mut trace),
+                igtc_trace: None,
             };
             
             let res = reduce(g, app, &mut ctx);

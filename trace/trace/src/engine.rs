@@ -1,10 +1,11 @@
+
 use crate::arena::{Graph, Node, NodeId, Primitive};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{Zero, Signed};
 use smallvec::SmallVec;
+use crate::trace::{ExecutionTrace, RuleId, Branch};
 
-// ... encoding helpers (omitted for brevity in prompt diff but I will include them) ...
-// Actually I must include them or overwrite the file. I'll include them.
+// ... encoding helpers (omitted for brevity) ...
 
 pub fn zigzag(n: &BigInt) -> BigUint {
     match n.sign() {
@@ -48,7 +49,8 @@ pub fn encode_str(g: &mut Graph, s: &str) -> NodeId {
 pub struct EvalContext<'a> {
     pub steps: usize,
     pub step_limit: usize,
-    pub trace: Option<&'a mut crate::trace::Trace>,
+    pub trace: Option<&'a mut crate::trace::Trace>, // Sensitivity trace
+    pub igtc_trace: Option<&'a mut ExecutionTrace>, // IGTC blame trace
     pub depth: usize,
     pub depth_limit: usize,
 }
@@ -62,6 +64,7 @@ impl Default for EvalContext<'_> {
             depth: 0,
             depth_limit: 500,
             trace: None,
+            igtc_trace: None,
         }
     }
 }
@@ -72,9 +75,15 @@ pub fn reduce(g: &mut Graph, id: NodeId, ctx: &mut EvalContext) -> NodeId {
         curr = g.resolve(curr); // Always resolve first
         curr = g.resolve(curr); // Always resolve first
         if !reduce_step(g, curr, ctx) {
+            if let Some(trace) = &mut ctx.igtc_trace {
+                trace.set_result(curr);
+            }
             return curr;
         }
         ctx.steps += 1;
+    }
+    if let Some(trace) = &mut ctx.igtc_trace {
+        trace.set_result(curr);
     }
     curr
 }
@@ -133,6 +142,20 @@ fn reduce_app(g: &mut Graph, root: NodeId, ctx: &mut EvalContext) -> bool {
         }
     }
 
+    // No redex found at this application spine; try to reduce the head or args
+    if let Some(&app_id) = stack.last() {
+        if let Node::App { func, args } = g.get(app_id).clone() {
+            if reduce_step(g, func, ctx) {
+                return true;
+            }
+            for arg in args {
+                if reduce_step(g, arg, ctx) {
+                    return true;
+                }
+            }
+        }
+    }
+
     false
 }
 
@@ -152,10 +175,20 @@ fn attempt_reduction(
             } else if args.len() == 2 {
                 let fork = g.add(Node::Fork(args[0], args[1]));
                 g.replace(root, Node::Ind(fork));
+                
+                if let Some(trace) = &mut ctx.igtc_trace {
+                    trace.record(RuleId::App, head, args.to_vec(), fork);
+                }
+                
                 true
             } else if args.len() == 1 {
                 let stem = g.add(Node::Stem(args[0]));
                 g.replace(root, Node::Ind(stem));
+                
+                if let Some(trace) = &mut ctx.igtc_trace {
+                    trace.record(RuleId::App, head, args.to_vec(), stem);
+                }
+                
                 true
             } else {
                 false
@@ -178,6 +211,11 @@ fn attempt_reduction(
         Node::Prim(p) => {
             if let Some(res) = apply_primitive(g, p, args) {
                 g.replace(root, Node::Ind(res));
+                
+                if let Some(trace) = &mut ctx.igtc_trace {
+                    trace.record(RuleId::Prim, head, args.to_vec(), res);
+                }
+                
                 return true;
             }
 
@@ -185,6 +223,9 @@ fn attempt_reduction(
             let mut sub_ctx = EvalContext::default();
             sub_ctx.step_limit = 100;
             sub_ctx.depth = ctx.depth + 1;
+            // NOTE: sub_ctx does not inherit trace recorders to avoid noisy traces for primitive argument evaluation
+            // or pass them if we want deep blame. For now, let's NOT pass trace to pritimitive args.
+            
             for &arg in args {
                 if reduce_step(g, arg, &mut sub_ctx) {
                     changed = true;
@@ -199,6 +240,14 @@ fn attempt_reduction(
             let new_node = Node::App { func: inner_f, args: new_args };
             let new_id = g.add(new_node);
             g.replace(root, Node::Ind(new_id));
+            
+            // This is effectively re-association, conceptually App rule
+             if let Some(trace) = &mut ctx.igtc_trace {
+                // Not exactly App rule in the sense of absorption, but structural. 
+                // Let's record it if needed, but usually App rule is for Leaf/Stem absorption.
+                // trace.record(RuleId::App, head, args.to_vec(), new_id);
+            }
+            
             true
         }
         _ => false,
@@ -219,14 +268,18 @@ fn triage_reduce(
     }
 
     let p_node = g.get(g.resolve(p)).clone();
-    let res = match p_node {
+    let (res, rule_id, captured_args) = match p_node {
         // Rule 1: △△ y z -> y
-        Node::Leaf => Some(q),
+        Node::Leaf => (Some(q), Some(RuleId::K), vec![q, r]), // y=q, z=r
         // Rule 2: △(△x) y z -> x z (y z)
         Node::Stem(x) => {
             let xz = g.add(Node::App { func: x, args: smallvec::smallvec![r] });
             let yz = g.add(Node::App { func: q, args: smallvec::smallvec![r] });
-            Some(g.add(Node::App { func: xz, args: smallvec::smallvec![yz] }))
+            (
+                Some(g.add(Node::App { func: xz, args: smallvec::smallvec![yz] })),
+                Some(RuleId::S),
+                vec![x, q, r] // x, y=q, z=r
+            )
         }
         // Rules 3-5: triage on z when p is a fork
         Node::Fork(w, x) => {
@@ -235,25 +288,63 @@ fn triage_reduce(
             }
 
             match g.get(g.resolve(r)).clone() {
-                Node::Leaf => Some(w),
-                Node::Stem(u) => Some(g.add(Node::App { func: x, args: smallvec::smallvec![u] })),
-                Node::Fork(u, v) => Some(g.add(Node::App { func: q, args: smallvec::smallvec![u, v] })),
-                _ => None,
+                Node::Leaf => {
+                    if let Some(trace) = &mut ctx.trace {
+                        trace.record(r, Branch::Leaf);
+                    }
+                    (Some(w), Some(RuleId::TriageLeaf), vec![w]) // w=w
+                }
+                Node::Stem(u) => {
+                    if let Some(trace) = &mut ctx.trace {
+                        trace.record(r, Branch::Stem);
+                    }
+                    (
+                        Some(g.add(Node::App { func: x, args: smallvec::smallvec![u] })),
+                        Some(RuleId::TriageStem),
+                        vec![x, u]
+                    )
+                }
+                Node::Fork(u, v) => {
+                    if let Some(trace) = &mut ctx.trace {
+                        trace.record(r, Branch::Fork);
+                    }
+                    (
+                        Some(g.add(Node::App { func: q, args: smallvec::smallvec![u, v] })),
+                        Some(RuleId::TriageFork),
+                        vec![q, u, v] // y=q, u, v
+                    )
+                }
+                _ => (None, None, vec![]),
             }
         }
-        _ => None,
+        _ => (None, None, vec![]),
     };
 
     if let Some(mut result) = res {
+        // Handle 'rest' arguments which are applied to the result
+        // Effectively: (reduce_result) rest...
         for &arg in rest {
             result = g.add(Node::App { func: result, args: smallvec::smallvec![arg] });
         }
+        
         g.replace(root, Node::Ind(result));
+        
+        if let (Some(trace), Some(rule)) = (&mut ctx.igtc_trace, rule_id) {
+            // Note: redex is difficult to pinpoint here because triage_reduce is called with disparate args.
+            // But usually 'root' is the application that triggered this.
+            // Or rather, the combinator logic triggered by p.
+            // Let's use 'p' as redex proxy or root?
+            // Trace expects: rule, redex, args, result
+            // 'root' is the NodeId being replaced.
+            trace.record(rule, root, captured_args, result);
+        }
+        
         true
     } else {
         false
     }
 }
+
 
 
 // Removed try_reduce_rule as it is now integrated into reduce_step logic

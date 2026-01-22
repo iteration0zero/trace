@@ -5,6 +5,11 @@
 (def inc (fn x (+ x 1.0)))
 (def bool_test (fn b (if b 1.0 2.0)))
 
+; Fixpoint building blocks from tree_book
+; d{x} = n (n x) is in prelude as d; self_apply = d{I}I is in prelude as self_apply
+; ω = λ* z. λ* f. f (z z f) = d{K I}(d{self_apply}(K d))
+(def omega (d (k i) (d self_apply (k d))))
+
 (id x)
 
 (inc 10.1)
@@ -32,3 +37,80 @@
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
   ((cons 3.0 (cons 4.0 n)) (cons 4.0 (cons 3.0 n)))
 ) 2000)
+
+; ------------------------------------------------------------
+; Curriculum for implicit recursion / Z-combinator discovery
+; Each successful learn-from adds its result to the seed library.
+; ------------------------------------------------------------
+
+; ------------------------------------------------------------
+; Z curriculum (parts -> Z-like -> reverse)
+; Each pair is written as: (input output)
+; ------------------------------------------------------------
+
+; Part 1: self-application only (w-part of Z)
+(learn-self (i (s k k)) 1500)
+
+; Part 2: omega curriculum (ω with stable f = K I)
+(learn-from (
+  (((omega (k i)) i) i)
+  (((omega (k i)) (cons 1.0 n)) (cons 1.0 n))
+) 2000)
+
+; Part 3: wait1 delays one argument
+(learn-from (
+  ((((wait1 k) (cons 1.0 n)) (cons 2.0 n)) (cons 1.0 n))
+  ((((wait1 k) (cons 3.0 n)) (cons 4.0 n)) (cons 3.0 n))
+) 2000)
+
+; Part 4: wait2 delays two arguments
+(learn-from (
+  (((((wait2 k i) (cons 1.0 n)) (cons 2.0 n)) (cons 3.0 n)) (cons 2.0 n))
+  (((((wait2 k i) (cons 4.0 n)) (cons 5.0 n)) (cons 6.0 n)) (cons 5.0 n))
+) 2500)
+
+; Part 5: swap flips argument order
+(learn-from (
+  ((((swap k) (cons 1.0 n)) (cons 2.0 n)) (cons 2.0 n))
+  ((((swap k) (cons 3.0 n)) (cons 4.0 n)) (cons 4.0 n))
+) 2000)
+
+; Part 6: Z with stable f = K I
+(learn-from (
+  (((Z (k i)) (cons 1.0 n)) (cons 1.0 n))
+  (((Z (k i)) (cons 2.0 n)) (cons 2.0 n))
+) 3000)
+
+; Reverse curriculum after Z-like stage
+(learn-from (
+  ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
+  ((cons 5.0 (cons 6.0 n)) (cons 6.0 (cons 5.0 n)))
+) 1500)
+
+(learn-from (
+  ((cons 1.0 (cons 2.0 (cons 3.0 n))) (cons 3.0 (cons 2.0 (cons 1.0 n))))
+  ((cons 4.0 (cons 5.0 (cons 6.0 n))) (cons 6.0 (cons 5.0 (cons 4.0 n))))
+) 2500)
+
+(learn-from (
+  ((cons 1.0 (cons 2.0 (cons 3.0 (cons 4.0 n)))) (cons 4.0 (cons 3.0 (cons 2.0 (cons 1.0 n)))))
+  ((cons 7.0 (cons 8.0 (cons 9.0 (cons 10.0 n)))) (cons 10.0 (cons 9.0 (cons 8.0 (cons 7.0 n)))))
+) 4000)
+
+; Step A: swap two-element lists (reverse length-2)
+(learn-from (
+  ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
+  ((cons 5.0 (cons 6.0 n)) (cons 6.0 (cons 5.0 n)))
+) 1500)
+
+; Step B: reverse length-3 lists
+(learn-from (
+  ((cons 1.0 (cons 2.0 (cons 3.0 n))) (cons 3.0 (cons 2.0 (cons 1.0 n))))
+  ((cons 4.0 (cons 5.0 (cons 6.0 n))) (cons 6.0 (cons 5.0 (cons 4.0 n))))
+) 2500)
+
+; Step C: reverse longer lists (forces recursion)
+(learn-from (
+  ((cons 1.0 (cons 2.0 (cons 3.0 (cons 4.0 n)))) (cons 4.0 (cons 3.0 (cons 2.0 (cons 1.0 n)))))
+  ((cons 7.0 (cons 8.0 (cons 9.0 (cons 10.0 n)))) (cons 10.0 (cons 9.0 (cons 8.0 (cons 7.0 n)))))
+) 4000)

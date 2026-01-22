@@ -23,6 +23,8 @@ fn main() {
         ("k", "(n n)"),
         ("s", "(n (n (k n)) n)"),
         ("i", "(s k k)"),
+        // tree_book: self_apply = λ* w. w w = d{I} I, and d{x} = n (n x)
+        ("self_apply", "(n (n i) i)"),
         ("true", "k"),
         ("false", "n"),
         ("triage", "(fn w (fn x (fn y (n (n w x) y))))"),
@@ -30,6 +32,20 @@ fn main() {
         ("is-stem", "(fn z ((triage false (fn u true) (fn u (fn v false))) z))"),
         ("is-fork", "(fn z ((triage false (fn u false) (fn u (fn v true))) z))"),
         // first/rest are now primitives
+        ("d", "(fn x (n (n x)))"),
+        // Fixpoint helpers from tree_book
+        ("self_apply", "(n (n i) i)"), // d{I}I
+        ("omega", "(d (k i) (d self_apply (k d)))"), // ω = d{K I}(d{self_apply}(K d))
+        // wait{x,y} = d{I}(d{K y}(K x))
+        ("wait", "(fn x (fn y (d i (d (k y) (k x)))))"),
+        // wait1{x} = d{d{K(K x)}(d{d{K}(K△)}(K△))}(K(d{△KK}))
+        ("wait1", "(fn x (d (d (k (k x)) (d (d (k) (k n)) (k n))) (k (d (n (k k))))))"),
+        // wait2{x,y} = d{d{K(d{K y}(K x))} d{d{K}(K△)}(K△)}(K(d{I}))
+        ("wait2", "(fn x (fn y (d (d (k (d (k y) (k x))) (d (d (k) (k n)) (k n))) (k (d i)))))"),
+        // swap{f} = d{K f}d{d{K}(K△)}(K△)
+        ("swap", "(fn f (d (k f) (d (d (k) (k n)) (k n))))"),
+        // Z{f} = wait{self_apply, d{wait1{self_apply}(K f)}}
+        ("Z", "(fn f (wait self_apply (d (wait1 self_apply (k f)))))"),
         ("stem", "(fn x (n x))"),
         ("fork", "(fn a (fn b (n a b)))"),
         ("cons", "fork"),
@@ -122,7 +138,12 @@ fn main() {
         
         // Handle (learn-from ...)
         if trimmed.starts_with("(learn-from") {
-             handle_learn_from_command(trimmed, &mut g, &mut env);
+             handle_learn_from_command(trimmed, &mut g, &mut env, &mut library);
+             continue;
+        }
+        // Handle (learn-self ...)
+        if trimmed.starts_with("(learn-self") {
+             handle_learn_self_command(trimmed, &mut g, &mut env, &mut library);
              continue;
         }
 
@@ -141,6 +162,9 @@ fn main() {
                         
                         let mut ctx = EvalContext::default();
                         let result = reduce(&mut g, node, &mut ctx);
+                        if ctx.steps >= ctx.step_limit {
+                            println!("Warning: step limit reached; result may be a partial reduction.");
+                        }
                         println!("= {}", unparse(&g, result));
                     }
                     ParseResult::Def(name, node) => {
@@ -174,109 +198,89 @@ fn main() {
 fn handle_learn_from_command(
     input: &str, 
     g: &mut Graph, 
-    env: &mut HashMap<String, NodeId>
+    env: &mut HashMap<String, NodeId>,
+    library: &mut Vec<NodeId>,
 ) {
+    // Format: (learn-from ( (in1 out1) (in2 out2) ... ) epochs)
+    // We need to extract the examples list and epochs
+    
     let inner = input.trim_start_matches("(learn-from").trim_end_matches(')').trim();
     
-    // Parse: Count and Examples (Auto-detected via type)
-
-    // Robust Parsing using Parser loop
-    let mut p = Parser::new(inner);
-    let mut terms = Vec::new();
+    // Find the examples list (first parenthesized expression) and epochs (last number)
+    let mut depth = 0;
+    let mut examples_start = None;
+    let mut examples_end = None;
     
-    // Parse all terms in inner
-    while p.has_more() {
-        if let Ok(ParseResult::Term(node)) = p.parse_toplevel(g, Some(env)) {
-             terms.push(node);
-        } else {
-             break;
-        }
-    }
-    
-    let mut epochs = 100;
-    let mut examples_raw = None;
-    
-    for term in terms {
-        let mut ctx = EvalContext::default();
-        let val = reduce(g, term, &mut ctx);
-        match g.get(g.resolve(val)).clone() {
-            Node::Prim(Primitive::TagInt) => {
-                if let Some(bi) = trace::engine::decode_int(g, val) {
-                     if let Some(n) = bi.to_usize() { epochs = n; }
+    for (i, c) in inner.chars().enumerate() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    examples_start = Some(i);
                 }
-            },
-            _ => {
-                // Assume structure is the examples list
-                // It might not be reduced to List logic, but Application logic
-                examples_raw = Some(term); // Use unreduced term to preserve App structure?
-                // reduce() evaluates (cons a b) to Fork.
-                // But ( (a b) (c d) ) reduces to... application?
-                // If I use unreduced 'term', I can flatten Apps.
+                depth += 1;
             }
+            ')' => {
+                depth -= 1;
+                if depth == 0 && examples_start.is_some() && examples_end.is_none() {
+                    examples_end = Some(i + 1);
+                }
+            }
+            _ => {}
         }
     }
     
-    let raw_list = if let Some(n) = examples_raw { n } else {
-        println!("Error: No examples found.");
+    let (examples_str, rest) = if let (Some(start), Some(end)) = (examples_start, examples_end) {
+        (&inner[start..end], inner[end..].trim())
+    } else {
+        println!("Error: Could not find examples list in learn-from");
         return;
     };
     
-    // Flatten App chain: (a b c) -> App(App(a,b),c)
-    // We want [a, b, c]
-    fn flatten_apps(g: &Graph, node: NodeId, acc: &mut Vec<NodeId>) {
-        // Resolve? App is structural.
-        match g.get(node).clone() {
-            Node::App { func, args } => {
-                // Triage App has vec of args. App(f, [a1, a2]) -> f a1 a2
-                // Flatten f, then add args.
-                flatten_apps(g, func, acc);
-                for arg in args {
-                    acc.push(arg);
-                }
-            },
-            _ => acc.push(node)
-        }
-    }
+    // Parse epochs from rest (if any)
+    let epochs: usize = rest.parse().unwrap_or(100);
     
-    let mut items = Vec::new();
-    flatten_apps(g, raw_list, &mut items);
+    // Now parse the examples list content (without outer parens)
+    let examples_content = examples_str.trim_start_matches('(').trim_end_matches(')').trim();
     
+    // Parse each example pair: (input output)
     let mut examples = Vec::new();
+    let mut p = Parser::new(examples_content);
     let mut ctx = EvalContext::default();
     
-    for item in items {
-        // Each item is an Example Pair (in out).
-        // Parsed as App(in, out)
-        // Check structural App
-        match g.get(item).clone() {
-            Node::App { func, args } => {
-                if args.len() == 1 {
-                     // App(in, out)
-                     let input = func;
-                     let output = args[0];
-                     
-                     // We should REDUCE them now to get Values
-                     let in_val = reduce(g, input, &mut ctx);
-                     let out_val = reduce(g, output, &mut ctx);
-                     examples.push((in_val, out_val));
-                } else {
-                    println!("Error: Malformed example pair (multi-args): {:?}", g.get(item));
+    while p.has_more() {
+        // Each example is a parenthesized pair (input output)
+        if let Ok(ParseResult::Term(pair_node)) = p.parse_toplevel(g, Some(env)) {
+            // pair_node is compiled as App(input, output) in Triage syntax
+            // We need to:
+            // 1. Look at the App structure (unreduced)
+            // 2. Extract the two parts
+            
+            // Actually, let's use a simpler approach: parse TWO consecutive terms
+            // and treat them as (input, output) - this matches how (a b) is parsed
+            
+            // The pair_node from parse is already App(input, output)
+            // But after compilation, it might have been reduced
+            // Let's peek at the node structure
+            
+            match g.get(pair_node).clone() {
+                Node::App { func, args } if args.len() == 1 => {
+                    // Compiled as App(input, output)
+                    let in_val = reduce(g, func, &mut ctx);
+                    let out_val = reduce(g, args[0], &mut ctx);
+                    examples.push((in_val, out_val));
                 }
-            },
-            // Maybe it reduced to Fork if valid cons?
-            Node::Fork(cur_in, cur_tail) => {
-                 // Handle list-style (cons in (cons out n)) if user used cons
-                 // But (learn-from ( (a b) )) uses parens, likely App.
-                 // This branch is fallback.
-                 let out_node = match g.get(g.resolve(cur_tail)).clone() {
-                     Node::Fork(out, _) => out,
-                     _ => cur_tail
-                 };
-                 examples.push((cur_in, out_node));
+                Node::Fork(left, right) => {
+                    // Might have been reduced to Fork
+                    let in_val = reduce(g, left, &mut ctx);
+                    let out_val = reduce(g, right, &mut ctx);
+                    examples.push((in_val, out_val));
+                }
+                _ => {
+                    println!("Warning: Skipping malformed example pair");
+                }
             }
-            _ => {
-                println!("Error: Example item is not a pair (App or Fork). Got {:?}", g.get(item));
-            }
+        } else {
+            break;
         }
     }
     
@@ -285,22 +289,108 @@ fn handle_learn_from_command(
         return;
     }
 
-    println!("Parsed {} examples. Evolving for {} epochs...", examples.len(), epochs);
+    println!("Parsed {} examples. Running IGTC synthesis for {} iterations...", examples.len(), epochs);
     
-    let config = SearchConfig {
-        max_epochs: epochs,
-        max_depth: 3, 
-        lr: 0.1,
-    };
+    // Use IGTC synthesizer
+    // Use IGTC synthesizer
+    let mut config = trace::learner::IgtcConfig::default();
+    config.max_iterations = epochs;
+    // Keep other defaults which are now tuned (LR=0.01, support=500, edits=15)
     
-    if let Some(gene) = evolve(g, &examples, config) {
-        println!("Success! Learned Gene: {:?}", gene);
-        let learned_node = gene.compile(g); 
-        println!("Compiled Node: {}", unparse(g, learned_node));
+    if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
+        println!("Success! Learned Node: {}", unparse(g, learned_node));
         
         env.insert("learned".to_string(), learned_node);
         println!("Saved as 'learned'.");
+        
+        // Curriculum: add to library for future synthesis
+        library.push(learned_node);
     } else {
-        println!("Evolution failed to converge.");
+        println!("IGTC synthesis failed to converge.");
+    }
+}
+
+/// Handle learn-self command: (learn-self (t1 t2 ...) epochs)
+/// Builds examples where output = (t t) reduced, i.e. self-application.
+fn handle_learn_self_command(
+    input: &str,
+    g: &mut Graph,
+    env: &mut HashMap<String, NodeId>,
+    library: &mut Vec<NodeId>,
+) {
+    let inner = input.trim_start_matches("(learn-self").trim_end_matches(')').trim();
+
+    // Find the term list (first parenthesized expression) and epochs (last number)
+    let mut depth = 0;
+    let mut list_start = None;
+    let mut list_end = None;
+
+    for (i, c) in inner.chars().enumerate() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    list_start = Some(i);
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 && list_start.is_some() && list_end.is_none() {
+                    list_end = Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (list_str, rest) = if let (Some(start), Some(end)) = (list_start, list_end) {
+        (&inner[start..end], inner[end..].trim())
+    } else {
+        println!("Error: Could not find term list in learn-self");
+        return;
+    };
+
+    let epochs: usize = rest.parse().unwrap_or(100);
+    let list_content = list_str.trim_start_matches('(').trim_end_matches(')').trim();
+
+    let mut examples = Vec::new();
+    let mut p = Parser::new(list_content);
+    let mut ctx = EvalContext::default();
+    ctx.step_limit = 10_000;
+
+    while p.has_more() {
+        if let Ok(ParseResult::Term(term)) = p.parse_toplevel(g, Some(env)) {
+            let input = reduce(g, term, &mut ctx);
+            let app = g.add(Node::App { func: input, args: smallvec::smallvec![input] });
+            let mut out_ctx = EvalContext::default();
+            out_ctx.step_limit = 10_000;
+            let output = reduce(g, app, &mut out_ctx);
+            if out_ctx.steps >= out_ctx.step_limit {
+                println!("Warning: self-apply example hit step limit; skipping.");
+                continue;
+            }
+            examples.push((input, output));
+        } else {
+            break;
+        }
+    }
+
+    if examples.is_empty() {
+        println!("Error: Empty examples list.");
+        return;
+    }
+
+    println!("Parsed {} examples. Running IGTC synthesis for {} iterations...", examples.len(), epochs);
+
+    let mut config = trace::learner::IgtcConfig::default();
+    config.max_iterations = epochs;
+
+    if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
+        println!("Success! Learned Node: {}", unparse(g, learned_node));
+        env.insert("learned".to_string(), learned_node);
+        println!("Saved as 'learned'.");
+        library.push(learned_node);
+    } else {
+        println!("IGTC synthesis failed to converge.");
     }
 }

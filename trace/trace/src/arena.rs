@@ -75,9 +75,11 @@ pub enum Primitive {
     TypeOf, Any, Match, Mod,
 }
 
+#[derive(Clone)]
 pub struct Graph {
     pub nodes: Vec<Node>,
     interner: FxHashMap<Node, NodeId>,
+    interning: bool,
 }
 
 impl Graph {
@@ -85,7 +87,23 @@ impl Graph {
         Self {
             nodes: Vec::with_capacity(1024),
             interner: FxHashMap::default(),
+            interning: true,
         }
+    }
+
+    /// Construct a graph that does not intern nodes (useful for destructive evaluation).
+    pub fn new_uninterned() -> Self {
+        Self {
+            nodes: Vec::with_capacity(1024),
+            interner: FxHashMap::default(),
+            interning: false,
+        }
+    }
+
+    /// Disable interning for this graph (prevents stale interner during rewriting).
+    pub fn disable_interning(&mut self) {
+        self.interning = false;
+        self.interner.clear();
     }
 
     pub fn add(&mut self, node: Node) -> NodeId {
@@ -117,13 +135,17 @@ impl Graph {
              _ => node
         };
 
-        if let Some(&id) = self.interner.get(&node) {
-            return id;
+        if self.interning {
+            if let Some(&id) = self.interner.get(&node) {
+                return id;
+            }
         }
         let id = NodeId(self.nodes.len() as u32);
         // println!("DEBUG: Graph::add {:?} -> ID {}", node, id.0);
         self.nodes.push(node.clone());
-        self.interner.insert(node, id);
+        if self.interning {
+            self.interner.insert(node, id);
+        }
         id
     }
 
