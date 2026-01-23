@@ -201,9 +201,237 @@ impl IgtcSynthesizer {
                             blamed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                             for (i, (path, b)) in blamed.iter().take(5).enumerate() {
                                 if let Some(node) = node_at_path(g, best.program, path) {
-                                    let node_str = unparse(g, node);
-                                    println!("  Blame {}: {:.4} at path {:?} -> {}", i, b, path, node_str);
+                                    let resolved = g.resolve(node);
+                                    let alias_count = path_map
+                                        .get(&resolved)
+                                        .map(|v| v.len())
+                                        .unwrap_or(1);
+                                    let max_len = 160;
+                                    println!(
+                                        "  Blame {}: {:.4} at path {:?} (aliases={})",
+                                        i,
+                                        b,
+                                        path,
+                                        alias_count
+                                    );
+                                    println!("    node: {}", fmt_node_brief(g, resolved, max_len));
+                                    if !path.is_empty() {
+                                        let parent_path = &path[..path.len() - 1];
+                                        let child_idx = *path.last().unwrap();
+                                        if let Some(parent) = node_at_path(g, best.program, parent_path) {
+                                            let parent_resolved = g.resolve(parent);
+                                            let child_label = match g.get(parent_resolved) {
+                                                Node::Stem(_) => "child".to_string(),
+                                                Node::Fork(_, _) => {
+                                                    if child_idx == 0 { "left".to_string() } else { "right".to_string() }
+                                                }
+                                                Node::App { .. } => {
+                                                    if child_idx == 0 {
+                                                        "func".to_string()
+                                                    } else {
+                                                        format!("arg{}", child_idx - 1)
+                                                    }
+                                                }
+                                                _ => format!("idx{}", child_idx),
+                                            };
+                                            println!(
+                                                "    parent@{:?} {} -> {}",
+                                                parent_path,
+                                                child_label,
+                                                fmt_node_brief(g, parent_resolved, max_len)
+                                            );
+                                        }
+                                    }
+                                    match g.get(resolved) {
+                                        Node::Stem(inner) => {
+                                            println!("    child[0]: {}", fmt_node_brief(g, *inner, max_len));
+                                        }
+                                        Node::Fork(l, r) => {
+                                            println!("    left:  {}", fmt_node_brief(g, *l, max_len));
+                                            println!("    right: {}", fmt_node_brief(g, *r, max_len));
+                                        }
+                                        Node::App { func, args } => {
+                                            println!("    func:  {}", fmt_node_brief(g, *func, max_len));
+                                            let mut shown = 0usize;
+                                            for (idx, arg) in args.iter().enumerate() {
+                                                if shown >= 3 { break; }
+                                                println!(
+                                                    "    arg[{}]: {}",
+                                                    idx,
+                                                    fmt_node_brief(g, *arg, max_len)
+                                                );
+                                                shown += 1;
+                                            }
+                                            if args.len() > shown {
+                                                println!("    ... {} more args", args.len() - shown);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
+                            }
+                        }
+                        // Variance debug + parent map for the best candidate
+                        let mut per_example_blame: Vec<HashMap<NodeId, f64>> = Vec::new();
+                        let mut eval_blame_nodes = 0usize;
+                        let mut mapped_nodes = 0usize;
+                        let mut unmapped_nodes = 0usize;
+                        let mut fallback_count = 0usize;
+                        for (inp, expected) in self.examples.iter() {
+                            let (_loss, blame_map, _actual_str, stats) = evaluate_candidate_with_stats(
+                                g,
+                                best.program,
+                                *inp,
+                                *expected,
+                                self.config.max_eval_steps,
+                            );
+                            eval_blame_nodes += stats.eval_blame_count;
+                            mapped_nodes += stats.mapped_count;
+                            unmapped_nodes += stats.unmapped_count;
+                            if stats.fallback_applied {
+                                fallback_count += 1;
+                            }
+                            let mut resolved_blame: HashMap<NodeId, f64> = HashMap::new();
+                            for (node, b) in blame_map {
+                                let resolved = g.resolve(node);
+                                *resolved_blame.entry(resolved).or_insert(0.0) += b;
+                            }
+                            per_example_blame.push(resolved_blame);
+                        }
+                        println!(
+                            "  Blame map debug: eval_blame_nodes={} mapped_nodes={} unmapped_nodes={} fallbacks={}/{}",
+                            eval_blame_nodes,
+                            mapped_nodes,
+                            unmapped_nodes,
+                            fallback_count,
+                            self.examples.len()
+                        );
+                        if !per_example_blame.is_empty() {
+                            let n_total = per_example_blame.len() as f64;
+                            let mut sum: HashMap<NodeId, f64> = HashMap::new();
+                            let mut sumsq: HashMap<NodeId, f64> = HashMap::new();
+                            let mut nz: HashMap<NodeId, f64> = HashMap::new();
+                            for bm in &per_example_blame {
+                                for (&node, &b) in bm.iter() {
+                                    *sum.entry(node).or_insert(0.0) += b;
+                                    *sumsq.entry(node).or_insert(0.0) += b * b;
+                                    *nz.entry(node).or_insert(0.0) += 1.0;
+                                }
+                            }
+                            let mut vars: Vec<(NodeId, f64, f64, f64, f64, f64)> = Vec::new(); // node, mean, var, send, keep, nz
+                            for (node, s) in sum {
+                                let ss = sumsq.get(&node).copied().unwrap_or(0.0);
+                                let mean = s / n_total;
+                                let var = (ss / n_total) - mean * mean;
+                                let v = var.max(0.0);
+                                if mean > 0.0 || v > 0.0 {
+                                    // Use coefficient-of-variation style ratio (clamped)
+                                    let sd = v.sqrt();
+                                    let ratio = if mean > 0.0 {
+                                        (sd / (mean + 1e-9)).min(1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let send = mean * ratio;
+                                    let keep = mean - send;
+                                    let nzc = nz.get(&node).copied().unwrap_or(0.0);
+                                    vars.push((node, mean, v, send, keep, nzc));
+                                }
+                            }
+                            if vars.is_empty() {
+                                println!("  Variance debug: no variance/mean signals");
+                            } else {
+                                vars.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+                                let max_show = 5usize.min(vars.len());
+                                let total_mean: f64 = vars.iter().map(|(_, mean, _, _, _, _)| *mean).sum();
+                                let total_send: f64 = vars.iter().map(|(_, _, _, send, _, _)| *send).sum();
+                                let total_keep: f64 = vars.iter().map(|(_, _, _, _, keep, _)| *keep).sum();
+                                let send_ratio = if total_mean > 0.0 { total_send / total_mean } else { 0.0 };
+                                println!("  Variance debug (top {}):", max_show);
+                                for (i, (node, mean, var, send, keep, nzc)) in vars.iter().take(max_show).enumerate() {
+                                    let resolved = g.resolve(*node);
+                                    let alias_count = path_map
+                                        .get(&resolved)
+                                        .map(|v| v.len())
+                                        .unwrap_or(0);
+                                    let ratio = if *mean > 0.0 { send / mean } else { 0.0 };
+                                    let max_len = 160;
+                                    println!(
+                                        "    Var {}: mean={:.4} var={:.4} ratio={:.4} send={:.4} keep={:.4} count={:.0} nz={:.0} paths={} node={}",
+                                        i,
+                                        mean,
+                                        var,
+                                        ratio,
+                                        send,
+                                        keep,
+                                        n_total,
+                                        nzc,
+                                        alias_count,
+                                        fmt_node_brief(g, resolved, max_len)
+                                    );
+                                    if let Some(paths) = path_map.get(&resolved) {
+                                        let mut parent_map: HashMap<NodeId, Vec<Vec<u8>>> = HashMap::new();
+                                        let mut root_paths = 0usize;
+                                        for path in paths {
+                                            if path.is_empty() {
+                                                root_paths += 1;
+                                                continue;
+                                            }
+                                            let mut parent_path = path.clone();
+                                            parent_path.pop();
+                                            if let Some(pnode) = node_at_path(g, best.program, &parent_path) {
+                                                parent_map.entry(pnode).or_insert_with(Vec::new).push(parent_path);
+                                            }
+                                        }
+                                        let occurrences = paths.len();
+                                        let share = if occurrences > 0 {
+                                            *send / occurrences as f64
+                                        } else {
+                                            *send
+                                        };
+                                        if parent_map.is_empty() {
+                                            println!(
+                                                "      parents: <none> (occurrences={}, share_per_occ={:.4})",
+                                                occurrences,
+                                                share
+                                            );
+                                        } else {
+                                            println!(
+                                                "      parents: {} (occurrences={}, share_per_occ={:.4})",
+                                                parent_map.len(),
+                                                occurrences,
+                                                share
+                                            );
+                                            for (pnode, ppaths) in parent_map.iter() {
+                                                let p_res = g.resolve(*pnode);
+                                                let path_example = ppaths.get(0).cloned().unwrap_or_default();
+                                                let total_share = share * ppaths.len() as f64;
+                                                println!(
+                                                    "        path_count={} share={:.4} example_path={:?} parent={}",
+                                                    ppaths.len(),
+                                                    total_share,
+                                                    path_example,
+                                                    fmt_node_brief(g, p_res, max_len)
+                                                );
+                                            }
+                                        }
+                                        if root_paths > 0 {
+                                            println!(
+                                                "      root_paths={} (signal stays on node)",
+                                                root_paths
+                                            );
+                                        }
+                                    } else {
+                                        println!("      parents: <unmapped> (node not in path_map)");
+                                    }
+                                }
+                                println!(
+                                    "  Variance totals: mean={:.4} send={:.4} keep={:.4} sent_ratio={:.4}",
+                                    total_mean,
+                                    total_send,
+                                    total_keep,
+                                    send_ratio
+                                );
                             }
                         }
                     }
@@ -257,9 +485,10 @@ impl IgtcSynthesizer {
         for candidate in &mut self.support {
             let mut total_loss = 0.0;
             let mut combined_blame: HashMap<NodeId, f64> = HashMap::new();
+            let mut per_example_blame: Vec<HashMap<NodeId, f64>> = Vec::new();
             
             for (input, expected) in &self.examples {
-                let (loss, blame_map) = evaluate_candidate(
+                let (loss, blame_map, _actual_str) = evaluate_candidate(
                     g,
                     candidate.program,
                     *input,
@@ -268,19 +497,85 @@ impl IgtcSynthesizer {
                 );
                 
                 total_loss += loss;
-                
-                if loss > 0.0 {
-                    for (node, b) in blame_map {
-                        *combined_blame.entry(node).or_insert(0.0) += b;
+
+                let mut resolved_blame: HashMap<NodeId, f64> = HashMap::new();
+                for (node, b) in blame_map {
+                    let resolved = g.resolve(node);
+                    *resolved_blame.entry(resolved).or_insert(0.0) += b;
+                }
+
+                per_example_blame.push(resolved_blame);
+            }
+
+            // Variance-based blame propagation: a node that cannot disambiguate
+            // sends a portion of its mean signal upward to its parent(s),
+                        // proportional to coefficient-of-variation. The remaining signal stays on the node.
+            if !per_example_blame.is_empty() {
+                let n_total = per_example_blame.len() as f64;
+                let mut sum: HashMap<NodeId, f64> = HashMap::new();
+                let mut sumsq: HashMap<NodeId, f64> = HashMap::new();
+                for bm in &per_example_blame {
+                    for (&node, &b) in bm.iter() {
+                        *sum.entry(node).or_insert(0.0) += b;
+                        *sumsq.entry(node).or_insert(0.0) += b * b;
+                    }
+                }
+
+                if !sum.is_empty() {
+                    let path_map = collect_paths_map(g, candidate.program);
+                    for (node, s) in sum {
+                        let ss = sumsq.get(&node).copied().unwrap_or(0.0);
+                        let mean = s / n_total;
+                        if !(mean > 0.0) {
+                            continue;
+                        }
+                        let var = (ss / n_total) - mean * mean;
+                        let v = var.max(0.0);
+                        let sd = v.sqrt();
+                        let ratio = if mean > 0.0 {
+                            (sd / (mean + 1e-9)).min(1.0)
+                        } else {
+                            0.0
+                        };
+                        let send = mean * ratio;
+                        let keep = mean - send;
+
+                        if keep > 0.0 {
+                            *combined_blame.entry(node).or_insert(0.0) += keep;
+                        }
+
+                        if send <= 0.0 {
+                            continue;
+                        }
+
+                        if let Some(paths) = path_map.get(&node) {
+                            let occurrences = paths.len();
+                            if occurrences == 0 {
+                                *combined_blame.entry(node).or_insert(0.0) += send;
+                                continue;
+                            }
+                            let share = send / occurrences as f64;
+                            for path in paths {
+                                if path.is_empty() {
+                                    *combined_blame.entry(node).or_insert(0.0) += share;
+                                    continue;
+                                }
+                                let mut parent_path = path.clone();
+                                parent_path.pop();
+                                if let Some(parent) = node_at_path(g, candidate.program, &parent_path) {
+                                    let parent_resolved = g.resolve(parent);
+                                    *combined_blame.entry(parent_resolved).or_insert(0.0) += share;
+                                } else {
+                                    *combined_blame.entry(node).or_insert(0.0) += share;
+                                }
+                            }
+                        } else {
+                            *combined_blame.entry(node).or_insert(0.0) += send;
+                        }
                     }
                 }
             }
 
-            if combined_blame.is_empty() && total_loss > 0.0 {
-                // Fallback: blame the whole program if we couldn't attribute structure.
-                *combined_blame.entry(candidate.program).or_insert(0.0) += total_loss;
-            }
-            
             candidate.loss = Some(total_loss);
             candidate.blame = Some(combined_blame);
             
@@ -414,8 +709,6 @@ impl IgtcSynthesizer {
                 let mut rng = rand::thread_rng();
                 let mut edit_targets: Vec<Vec<u8>> = Vec::new();
                 let mut seen_targets: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-                let max_ancestor_depth = 2;
-
                 for (path, b) in blamed_paths.iter() {
                     if edit_targets.len() >= self.config.num_edits {
                         break;
@@ -424,22 +717,6 @@ impl IgtcSynthesizer {
                     if seen_targets.insert(path.clone()) {
                         edit_targets.push(path.clone());
                     }
-
-                    // Also include a few ancestors so we can change structure higher up
-                    if !path.is_empty() {
-                        let mut anc = path.clone();
-                        for _ in 0..max_ancestor_depth {
-                            if anc.is_empty() { break; }
-                            anc.pop();
-                            if seen_targets.insert(anc.clone()) {
-                                edit_targets.push(anc.clone());
-                                if edit_targets.len() >= self.config.num_edits {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
 
                     if total_blame > 0.0 {
                         let share = (b / total_blame).clamp(0.0, 1.0);
@@ -476,13 +753,6 @@ impl IgtcSynthesizer {
                                 }
                             }
                         }
-                    }
-                }
-
-                // Always allow editing the root when there's blame, to enable global structural changes
-                if !blamed_paths.is_empty() && edit_targets.len() < self.config.num_edits {
-                    if seen_targets.insert(Vec::new()) {
-                        edit_targets.push(Vec::new());
                     }
                 }
 
@@ -567,19 +837,40 @@ fn generate_edits(&self, g: &mut Graph, program: NodeId, path: &[u8]) -> Vec<Nod
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct EvalBlameStats {
+    eval_blame_count: usize,
+    mapped_count: usize,
+    unmapped_count: usize,
+    fallback_applied: bool,
+}
+
 fn evaluate_candidate(
     g: &Graph,
     program: NodeId,
     input: NodeId,
     expected: NodeId,
     max_steps: usize,
-) -> (f64, HashMap<NodeId, f64>) {
+) -> (f64, HashMap<NodeId, f64>, String) {
+    let (loss, blame_orig, actual_str, _stats) =
+        evaluate_candidate_with_stats(g, program, input, expected, max_steps);
+    (loss, blame_orig, actual_str)
+}
+
+fn evaluate_candidate_with_stats(
+    g: &Graph,
+    program: NodeId,
+    input: NodeId,
+    expected: NodeId,
+    max_steps: usize,
+) -> (f64, HashMap<NodeId, f64>, String, EvalBlameStats) {
     // Build an isolated evaluation graph so reductions cannot mutate shared nodes.
     let mut eval_g = Graph::new_uninterned();
+    let program_resolved = g.resolve(program);
 
     let mut prog_memo = HashMap::new();
     let mut eval_to_orig: HashMap<NodeId, NodeId> = HashMap::new();
-    let prog_eval = clone_subtree(g, &mut eval_g, program, &mut prog_memo, Some(&mut eval_to_orig));
+    let prog_eval = clone_subtree(g, &mut eval_g, program_resolved, &mut prog_memo, Some(&mut eval_to_orig));
 
     let mut input_memo = HashMap::new();
     let input_eval = clone_subtree(g, &mut eval_g, input, &mut input_memo, None);
@@ -616,9 +907,11 @@ fn evaluate_candidate(
     let expected_nf = reduce(&mut eval_g, expected_eval, &mut expected_ctx);
 
     let loss = tree_edit_distance(&eval_g, actual, expected_nf) as f64;
+    let actual_str = unparse(&eval_g, actual);
 
+    let mut stats = EvalBlameStats::default();
     if loss == 0.0 {
-        return (0.0, HashMap::new());
+        return (0.0, HashMap::new(), actual_str, stats);
     }
 
     let mut seeds: Vec<(NodeId, f64)> = Vec::new();
@@ -628,16 +921,24 @@ fn evaluate_candidate(
     }
     trace.seed_blame(&seeds);
     let blame_eval = trace.backpropagate();
+    stats.eval_blame_count = blame_eval.len();
 
     // Map blame back to original program nodes using the clone map
     let mut blame_orig: HashMap<NodeId, f64> = HashMap::new();
     for (eval_node, b) in blame_eval {
         if let Some(orig_node) = eval_to_orig.get(&eval_node) {
+            stats.mapped_count += 1;
             *blame_orig.entry(*orig_node).or_insert(0.0) += b;
         }
     }
+    stats.unmapped_count = stats.eval_blame_count.saturating_sub(stats.mapped_count);
 
-    (loss, blame_orig)
+    if blame_orig.is_empty() {
+        *blame_orig.entry(program_resolved).or_insert(0.0) += loss;
+        stats.fallback_applied = true;
+    }
+
+    (loss, blame_orig, actual_str, stats)
 }
 
 fn eval_candidate_loss_and_outputs(
@@ -929,6 +1230,37 @@ fn node_at_path(g: &Graph, root: NodeId, path: &[u8]) -> Option<NodeId> {
         }
     }
     Some(curr)
+}
+
+fn node_kind_name(node: &Node) -> &'static str {
+    match node {
+        Node::Leaf => "Leaf",
+        Node::Stem(_) => "Stem",
+        Node::Fork(_, _) => "Fork",
+        Node::Prim(_) => "Prim",
+        Node::Float(_) => "Float",
+        Node::Ind(_) => "Ind",
+        Node::Handle(_) => "Handle",
+        Node::App { .. } => "App",
+    }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let mut out = s[..max_len].to_string();
+    out.push_str("...");
+    out
+}
+
+fn fmt_node_brief(g: &Graph, id: NodeId, max_len: usize) -> String {
+    let resolved = g.resolve(id);
+    let kind = node_kind_name(g.get(resolved));
+    let size = estimate_size(g, resolved);
+    let raw = unparse(g, resolved);
+    let snippet = truncate_str(&raw, max_len);
+    format!("kind={} size={} {}", kind, size, snippet)
 }
 
 fn replace_at_path(g: &mut Graph, root: NodeId, path: &[u8], replacement: NodeId) -> NodeId {
