@@ -1,0 +1,73 @@
+    Checking trace v0.1.0 (/Users/mago/trace/trace)
+error: argument never used
+   --> src/learner/counterfactual/diagnostics.rs:153:21
+    |
+142 | ...     "STAGE_SLOW phase={} idx={} stage={} elapsed={:?} prog_size={} input_size={} expected_size={} program={} path={} depth={}",
+    |         -------------------------------------------------------------------------------------------------------------------------- formatting specifier missing
+...
+153 | ...     depth_str
+    |         ^^^^^^^^^ argument never used
+
+error[E0432]: unresolved imports `crate::engine::ExecutionTrace`, `crate::engine::RuleId`
+ --> src/learner/counterfactual/evaluator.rs:3:37
+  |
+3 |     reduce, tree_hash, EvalContext, ExecutionTrace, RuleId,
+  |                                     ^^^^^^^^^^^^^^  ^^^^^^ no `RuleId` in `engine`
+  |                                     |
+  |                                     no `ExecutionTrace` in `engine`
+  |
+  = help: consider importing this struct instead:
+          crate::trace::ExecutionTrace
+  = help: consider importing this enum instead:
+          crate::trace::RuleId
+
+warning: unused import: `crate::trace::RuleId`
+ --> src/engine/primitives.rs:2:5
+  |
+2 | use crate::trace::RuleId;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Primitive`
+ --> src/engine/reduce.rs:1:41
+  |
+1 | use crate::arena::{Graph, Node, NodeId, Primitive};
+  |                                         ^^^^^^^^^
+
+warning: value assigned to `actual_steps` is never read
+   --> src/learner/counterfactual/evaluator.rs:674:28
+    |
+674 |     let mut actual_steps = 0usize;
+    |                            ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `actual_step_limit` is never read
+   --> src/learner/counterfactual/evaluator.rs:675:33
+    |
+675 |     let mut actual_step_limit = budget;
+    |                                 ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_steps` is never read
+   --> src/learner/counterfactual/evaluator.rs:964:28
+    |
+964 |     let mut actual_steps = 0usize;
+    |                            ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_step_limit` is never read
+   --> src/learner/counterfactual/evaluator.rs:965:33
+    |
+965 |     let mut actual_step_limit = budget;
+    |                                 ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+For more information about this error, try `rustc --explain E0432`.
+warning: `trace` (lib) generated 6 warnings
+error: could not compile `trace` (lib) due to 2 previous errors; 6 warnings emitted

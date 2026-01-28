@@ -1,0 +1,151 @@
+    Checking trace v0.1.0 (/Users/mago/trace/trace)
+warning: unused import: `crate::trace::RuleId`
+ --> src/engine/primitives.rs:2:5
+  |
+2 | use crate::trace::RuleId;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Primitive`
+ --> src/engine/reduce.rs:1:41
+  |
+1 | use crate::arena::{Graph, Node, NodeId, Primitive};
+  |                                         ^^^^^^^^^
+
+warning: value assigned to `actual` is never read
+   --> src/learner/counterfactual/evaluator.rs:195:22
+    |
+195 |     let mut actual = applied;
+    |                      ^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `steps` is never read
+   --> src/learner/counterfactual/evaluator.rs:196:21
+    |
+196 |     let mut steps = 0usize;
+    |                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `step_limit` is never read
+   --> src/learner/counterfactual/evaluator.rs:197:26
+    |
+197 |     let mut step_limit = budget;
+    |                          ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `limit_hit` is never read
+   --> src/learner/counterfactual/evaluator.rs:198:25
+    |
+198 |     let mut limit_hit = false;
+    |                         ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `node_limit_hit` is never read
+   --> src/learner/counterfactual/evaluator.rs:199:30
+    |
+199 |     let mut node_limit_hit = false;
+    |                              ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `step_limit_hit` is never read
+   --> src/learner/counterfactual/evaluator.rs:200:30
+    |
+200 |     let mut step_limit_hit = false;
+    |                              ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_steps` is never read
+   --> src/learner/counterfactual/evaluator.rs:673:28
+    |
+673 |     let mut actual_steps = 0usize;
+    |                            ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_step_limit` is never read
+   --> src/learner/counterfactual/evaluator.rs:674:33
+    |
+674 |     let mut actual_step_limit = budget;
+    |                                 ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_steps` is never read
+   --> src/learner/counterfactual/evaluator.rs:963:28
+    |
+963 |     let mut actual_steps = 0usize;
+    |                            ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `actual_step_limit` is never read
+   --> src/learner/counterfactual/evaluator.rs:964:33
+    |
+964 |     let mut actual_step_limit = budget;
+    |                                 ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variant `Owned` is never constructed
+  --> src/compiler.rs:64:13
+   |
+61 |         enum Frame<'a> {
+   |              ----- variant in this enum
+...
+64 |             Owned(String),
+   |             ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Owned` is never constructed
+  --> src/engine/unparse.rs:57:9
+   |
+54 |     enum Item<'a> {
+   |          ---- variant in this enum
+...
+57 |         Owned(String),
+   |         ^^^^^
+
+warning: variant `Owned` is never constructed
+   --> src/engine/unparse.rs:219:9
+    |
+216 |     enum Item<'a> {
+    |          ---- variant in this enum
+...
+219 |         Owned(String),
+    |         ^^^^^
+
+warning: method `clone_as_gene` is never used
+   --> src/learner/genome.rs:115:8
+    |
+ 20 | impl Gene {
+    | --------- method in this implementation
+...
+115 |     fn clone_as_gene(&self, variant: Gene) -> Gene {
+    |        ^^^^^^^^^^^^^
+
+warning: function `label_for_node_app` is never used
+  --> src/learner/loss.rs:36:4
+   |
+36 | fn label_for_node_app() -> u64 {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: variant `Owned` is never constructed
+   --> src/learner/counterfactual/utils.rs:298:9
+    |
+294 |     enum Frame<'a> {
+    |          ----- variant in this enum
+...
+298 |         Owned(String),
+    |         ^^^^^
+
+warning: `trace` (lib) generated 18 warnings (run `cargo fix --lib -p trace` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.93s

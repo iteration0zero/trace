@@ -144,24 +144,7 @@ fn bexpr_i(g: &mut Graph) -> BExpr {
     BExpr::Const(i_node(g))
 }
 
-fn bexpr_occurs(name: &str, e: &BExpr) -> bool {
-    let mut stack = vec![e];
-    while let Some(curr) = stack.pop() {
-        match curr {
-            BExpr::Var(n) => {
-                if n == name {
-                    return true;
-                }
-            }
-            BExpr::Const(_) => {}
-            BExpr::App(l, r) => {
-                stack.push(&*r);
-                stack.push(&*l);
-            }
-        }
-    }
-    false
-}
+
 
 fn bexpr_abstract(g: &mut Graph, name: &str, e: BExpr) -> BExpr {
     enum Frame {

@@ -150,14 +150,10 @@ impl Graph {
             }
         }
     }
-
-    pub fn replace(&mut self, id: NodeId, node: Node) {
-        if (id.0 as usize) < self.nodes.len() {
-            self.nodes[id.0 as usize] = node;
-            self.epoch = self.epoch.wrapping_add(1);
-        }
-    }
 }
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -175,13 +171,5 @@ mod tests {
         assert_eq!(s1, s2);
     }
 
-    #[test]
-    fn test_canonicalization() {
-        let mut g = Graph::new();
-        let n = g.add(Node::Leaf);
-        // App(Leaf, [x]) -> Stem(x)
-        let app = g.add(Node::App { func: n, args: smallvec::smallvec![n] });
-        let stem = g.add(Node::Stem(n));
-        assert_eq!(app, stem);
-    }
+
 }

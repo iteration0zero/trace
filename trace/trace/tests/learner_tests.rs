@@ -1,29 +1,39 @@
 use trace::arena::{Graph, Node};
-use trace::learner::{LearnerConfig, learn};
-use trace::engine::{reduce, EvalContext, unparse};
-
-// test_learn_identity removed due to slow convergence in unit test environment
+use trace::learner::{CounterfactualConfig, counterfactual_synthesize};
+use trace::engine::{reduce, EvalContext};
 
 #[test]
-fn test_learn_k_combinator() {
-    // Learn a simple HOF: f x = Stem(x)
-    // Target = Leaf.
+fn test_learn_stem_function() {
+    // Learn: f x = Stem(x)
+    // In Triage, Leaf applied to x yields Stem(x).
+    // So the target program is just Leaf.
     
     let mut g = Graph::new();
-    let target = g.add(Node::Leaf); // acts as \x -> Stem(x)
     
-    let config = LearnerConfig {
-        epochs: 50,
-        lr: 0.1,
-        lambda: 0.0,
-        skeleton_depth: 5,
-        samples_per_step: 3,
+    // Create examples: x -> Stem(x)
+    let mut examples = Vec::new();
+    
+    // Ex 1: Leaf -> Stem(Leaf)
+    let leaf = g.add(Node::Leaf);
+    let stem_leaf = g.add(Node::Stem(leaf));
+    examples.push((leaf, stem_leaf));
+    
+    // Ex 2: Stem(Leaf) -> Stem(Stem(Leaf))
+    let stem_stem_leaf = g.add(Node::Stem(stem_leaf));
+    examples.push((stem_leaf, stem_stem_leaf));
+    
+    let config = CounterfactualConfig {
+        max_iterations: 50,
+        verbose: false,
+        ..Default::default()
     };
     
-    let res = learn(&mut g, target, None, config, vec![]);
-    assert!(res.is_some(), "Learner failed to find Leaf-like function");
+    let res = counterfactual_synthesize(&mut g, examples, config);
+    
+    assert!(res.is_some(), "Learner failed to find solution");
     let prog = res.unwrap();
     
+    // Verify on new input
     let x = g.add(Node::Float(1.0));
     let app = g.add(Node::App{ func: prog, args: smallvec::smallvec![x] });
     let mut ctx = EvalContext::default();
