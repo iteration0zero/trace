@@ -144,107 +144,220 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_list_rest(&mut self, g: &mut Graph, env: Option<&HashMap<String, NodeId>>, bound: &[String]) -> Result<CompileTerm, String> {
-        // We are inside (...), first token is in self.peek() (or consumed if I did logic above).
-        
-        // Special form: fn
-        if let Some(Token::Symbol(s)) = self.peek() {
-            if s == "fn" {
-                 self.consume();
-                 let param = match self.consume() {
-                     Some(Token::Symbol(p)) => p,
-                     _ => return Err("fn expects param".into()),
-                 };
-                 let mut new_bound = bound.to_vec();
-                 new_bound.push(param.clone());
-                 let body = self.parse_expr(g, env, &new_bound)?;
-                 match self.consume() {
-                     Some(Token::RParen) => return Ok(CompileTerm::Lam(param, Box::new(body))),
-                     _ => return Err("fn missing )".into()),
-                 }
-            }
-        }
-        
-        // Application
-        // (f a b) -> App(App(f, a), b)
-        // First element
-        let mut head = self.parse_expr(g, env, bound)?;
-        
-        loop {
-            match self.peek() {
-                Some(Token::RParen) => {
-                    self.consume();
-                    break;
-                }
-                None => return Err("EOF in list".into()),
-                _ => {
-                    let arg = self.parse_expr(g, env, bound)?;
-                    head = CompileTerm::App(Box::new(head), Box::new(arg));
-                }
-            }
-        }
-        Ok(head)
+        self.parse_with_stack(g, env, bound, vec![Context::new(bound)])
     }
-
-
 
     fn parse_expr(&mut self, g: &mut Graph, env: Option<&HashMap<String, NodeId>>, bound: &[String]) -> Result<CompileTerm, String> {
-        match self.consume() {
-            // ... (existing implementation) ...
-            Some(Token::Symbol(s)) => {
-                if bound.contains(&s) {
-                    return Ok(CompileTerm::Var(s));
-                }
-                if s == "n" {
-                    return Ok(CompileTerm::Const(g.add(Node::Leaf)));
-                }
-                if let Ok(i) = s.parse::<BigInt>() {
-                    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
-                        let raw = encode_int(g, &i);
-                        let tagged = crate::engine::make_tag(g, Primitive::TagInt, raw);
-                        return Ok(CompileTerm::Const(tagged));
+        self.parse_with_stack(g, env, bound, Vec::new())
+    }
+
+    fn parse_with_stack(
+        &mut self,
+        g: &mut Graph,
+        env: Option<&HashMap<String, NodeId>>,
+        bound: &[String],
+        mut stack: Vec<Context>,
+    ) -> Result<CompileTerm, String> {
+        let top_bound = bound.to_vec();
+
+        loop {
+            let token = self.consume().ok_or("Unexpected EOF".to_string())?;
+            match token {
+                Token::LParen => {
+                    if let Some(ctx) = stack.last() {
+                        if matches!(ctx.stage, ListStage::FnParam) {
+                            return Err("fn expects param".into());
+                        }
+                        stack.push(Context::new(&ctx.bound));
+                    } else {
+                        stack.push(Context::new(&top_bound));
                     }
                 }
-
-                if let Ok(f) = s.parse::<f64>() {
-                    let raw = g.add(Node::Float(f));
-                    let tagged = crate::engine::make_tag(g, Primitive::TagFloat, raw);
-                    return Ok(CompileTerm::Const(tagged));
-                }
-                if let Some(e) = env {
-                    if let Some(&id) = e.get(&s) {
-                        return Ok(CompileTerm::Const(id));
+                Token::RParen => {
+                    let ctx = stack.pop().ok_or("Unexpected )".to_string())?;
+                    let term = ctx.finish()?;
+                    if let Some(done) = push_or_return(term, &mut stack)? {
+                        return Ok(done);
                     }
                 }
-
-                // Primitives
-                let prim = match s.as_str() {
-                    "+" => Some(Primitive::Add),
-                    "-" => Some(Primitive::Sub),
-                    "*" => Some(Primitive::Mul),
-                    "/" => Some(Primitive::Div),
-                    "if" => Some(Primitive::If),
-                    "trace" => Some(Primitive::Trace),
-                    "first" => Some(Primitive::First),
-                    "rest" => Some(Primitive::Rest),
-                    _ => None,
-                };
-                if let Some(p) = prim {
-                    return Ok(CompileTerm::Const(g.add(Node::Prim(p))));
+                Token::Symbol(s) => {
+                    if let Some(ctx) = stack.last_mut() {
+                        ctx.consume_symbol(g, env, s)?;
+                    } else {
+                        return symbol_to_term(g, env, &top_bound, s);
+                    }
                 }
-                
-                Err(format!("Unknown symbol {}", s))
+                Token::String(s) => {
+                    let raw = encode_str(g, &s);
+                    let tagged = crate::engine::make_tag(g, Primitive::TagStr, raw);
+                    let term = CompileTerm::Const(tagged);
+                    if let Some(done) = push_or_return(term, &mut stack)? {
+                        return Ok(done);
+                    }
+                }
             }
-            Some(Token::String(s)) => {
-                let raw = encode_str(g, &s);
-                let tagged = crate::engine::make_tag(g, Primitive::TagStr, raw);
-                Ok(CompileTerm::Const(tagged))
-            }
-            Some(Token::LParen) => {
-                self.parse_list_rest(g, env, bound)
-            }
-            _ => Err("Unexpected token".into()),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ListStage {
+    Start,
+    FnParam,
+    FnBody,
+    Normal,
+}
+
+struct Context {
+    elems: Vec<CompileTerm>,
+    bound: Vec<String>,
+    stage: ListStage,
+    fn_param: Option<String>,
+}
+
+impl Context {
+    fn new(bound: &[String]) -> Self {
+        Self {
+            elems: Vec::new(),
+            bound: bound.to_vec(),
+            stage: ListStage::Start,
+            fn_param: None,
+        }
+    }
+
+    fn push_elem(&mut self, term: CompileTerm) -> Result<(), String> {
+        match self.stage {
+            ListStage::Start => {
+                self.stage = ListStage::Normal;
+                self.elems.push(term);
+                Ok(())
+            }
+            ListStage::FnParam => Err("fn expects param".into()),
+            ListStage::FnBody => {
+                if !self.elems.is_empty() {
+                    return Err("fn expects single body".into());
+                }
+                self.elems.push(term);
+                Ok(())
+            }
+            ListStage::Normal => {
+                self.elems.push(term);
+                Ok(())
+            }
+        }
+    }
+
+    fn consume_symbol(
+        &mut self,
+        g: &mut Graph,
+        env: Option<&HashMap<String, NodeId>>,
+        s: String,
+    ) -> Result<(), String> {
+        match self.stage {
+            ListStage::Start => {
+                if s == "fn" {
+                    self.stage = ListStage::FnParam;
+                    return Ok(());
+                }
+                let term = symbol_to_term(g, env, &self.bound, s)?;
+                self.stage = ListStage::Normal;
+                self.elems.push(term);
+                Ok(())
+            }
+            ListStage::FnParam => {
+                self.fn_param = Some(s.clone());
+                self.bound.push(s);
+                self.stage = ListStage::FnBody;
+                Ok(())
+            }
+            ListStage::FnBody | ListStage::Normal => {
+                let term = symbol_to_term(g, env, &self.bound, s)?;
+                self.elems.push(term);
+                Ok(())
+            }
+        }
+    }
+
+    fn finish(mut self) -> Result<CompileTerm, String> {
+        match self.stage {
+            ListStage::Start => Err("Empty list".into()),
+            ListStage::FnParam => Err("fn missing param/body".into()),
+            ListStage::FnBody => {
+                let param = self.fn_param.take().ok_or("fn missing param")?;
+                if self.elems.len() != 1 {
+                    return Err("fn expects single body".into());
+                }
+                Ok(CompileTerm::Lam(param, Box::new(self.elems.remove(0))))
+            }
+            ListStage::Normal => {
+                if self.elems.is_empty() {
+                    return Err("Empty list".into());
+                }
+                let mut iter = self.elems.into_iter();
+                let mut term = iter.next().unwrap();
+                for arg in iter {
+                    term = CompileTerm::App(Box::new(term), Box::new(arg));
+                }
+                Ok(term)
+            }
+        }
+    }
+}
+
+fn push_or_return(term: CompileTerm, stack: &mut Vec<Context>) -> Result<Option<CompileTerm>, String> {
+    if let Some(parent) = stack.last_mut() {
+        parent.push_elem(term)?;
+        Ok(None)
+    } else {
+        Ok(Some(term))
+    }
+}
+
+fn symbol_to_term(
+    g: &mut Graph,
+    env: Option<&HashMap<String, NodeId>>,
+    bound: &[String],
+    s: String,
+) -> Result<CompileTerm, String> {
+    if bound.contains(&s) {
+        return Ok(CompileTerm::Var(s));
+    }
+    if s == "n" {
+        return Ok(CompileTerm::Const(g.add(Node::Leaf)));
+    }
+    if let Ok(i) = s.parse::<BigInt>() {
+        if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+            let raw = encode_int(g, &i);
+            let tagged = crate::engine::make_tag(g, Primitive::TagInt, raw);
+            return Ok(CompileTerm::Const(tagged));
+        }
+    }
+
+    if let Ok(f) = s.parse::<f64>() {
+        let raw = g.add(Node::Float(f));
+        let tagged = crate::engine::make_tag(g, Primitive::TagFloat, raw);
+        return Ok(CompileTerm::Const(tagged));
+    }
+    if let Some(e) = env {
+        if let Some(&id) = e.get(&s) {
+            return Ok(CompileTerm::Const(id));
+        }
+    }
+
+    let prim = match s.as_str() {
+        "+" => Some(Primitive::Add),
+        "-" => Some(Primitive::Sub),
+        "*" => Some(Primitive::Mul),
+        "/" => Some(Primitive::Div),
+        "if" => Some(Primitive::If),
+        "trace" => Some(Primitive::Trace),
+        _ => None,
+    };
+    if let Some(p) = prim {
+        return Ok(CompileTerm::Const(g.add(Node::Prim(p))));
+    }
+
+    Err(format!("Unknown symbol {}", s))
 }
 
 #[cfg(test)]
@@ -271,14 +384,15 @@ mod tests {
         let mut g = Graph::new();
         let mut p = Parser::new("(n n)");
         let res = p.parse_toplevel(&mut g, None).unwrap();
-        // (n n) -> Fork(n, n) ??
-        // App(n, [n]) -> Stem(n)
+        // (n n) should parse as an App; reduction handles Leaf->Stem later.
         if let ParseResult::Term(id) = res {
              match g.get(id) {
-                 Node::Stem(inner) => {
-                     assert!(matches!(g.get(*inner), Node::Leaf));
-                 },
-                 _ => panic!("Expected Stem(n), got {:?}", g.get(id)),
+                 Node::App { func, args } => {
+                     assert!(matches!(g.get(*func), Node::Leaf));
+                     assert_eq!(args.len(), 1);
+                     assert!(matches!(g.get(args[0]), Node::Leaf));
+                 }
+                 _ => panic!("Expected App(n, [n]), got {:?}", g.get(id)),
              }
         }
     }

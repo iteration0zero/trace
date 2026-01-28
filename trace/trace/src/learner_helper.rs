@@ -60,90 +60,135 @@ fn mutate_rec(
     lr: f64,
     memo: &mut HashMap<NodeId, NodeId>
 ) -> Result<NodeId, String> {
+    enum Frame {
+        Enter(NodeId),
+        Exit(NodeId, Node),
+    }
+
     if let Some(&new_id) = memo.get(&id) {
         return Ok(new_id);
     }
-    
-    let resolved_id = g.resolve(id);
-    if resolved_id == target_id {
-        let node = g.get(resolved_id).clone();
-        let grads = gradients.get(&resolved_id).cloned().unwrap_or_default();
-        
-        let new_node_id = match node {
-             Node::Float(val) => {
-                 g.add(Node::Float(val - lr * grads.numeric))
-             },
-             Node::Leaf => {
-                 if grads.expansion > 0.0 {
-                     let l = g.add(Node::Leaf);
-                     g.add(Node::Stem(l))
-                 } else {
-                     id
-                 }
-             },
-             Node::Stem(inner) => {
-                 if grads.pruning > grads.expansion {
-                     inner 
-                 } else if grads.expansion > 0.0 {
-                     let l = g.add(Node::Leaf);
-                     g.add(Node::Fork(inner, l))
-                 } else {
-                     id
-                 }
-             },
-             Node::Fork(l, _r) => {
-                 if grads.pruning > 0.0 {
-                     g.add(Node::Stem(l))
-                 } else {
-                     id
-                 }
-             },
-             Node::App { func, .. } => {
-                 if grads.pruning > 0.0 {
-                     func
-                 } else {
-                     id
-                 }
-             },
-             _ => id
-        };
-        memo.insert(id, new_node_id);
-        return Ok(new_node_id);
+
+    let mut stack = Vec::new();
+    stack.push(Frame::Enter(id));
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(curr) => {
+                if memo.contains_key(&curr) {
+                    continue;
+                }
+
+                let resolved_id = g.resolve(curr);
+                if resolved_id == target_id {
+                    let node = g.get(resolved_id).clone();
+                    let grads = gradients.get(&resolved_id).cloned().unwrap_or_default();
+
+                    let new_node_id = match node {
+                        Node::Float(val) => g.add(Node::Float(val - lr * grads.numeric)),
+                        Node::Leaf => {
+                            if grads.expansion > 0.0 {
+                                let l = g.add(Node::Leaf);
+                                g.add(Node::Stem(l))
+                            } else {
+                                curr
+                            }
+                        }
+                        Node::Stem(inner) => {
+                            if grads.pruning > grads.expansion {
+                                inner
+                            } else if grads.expansion > 0.0 {
+                                let l = g.add(Node::Leaf);
+                                g.add(Node::Fork(inner, l))
+                            } else {
+                                curr
+                            }
+                        }
+                        Node::Fork(l, _r) => {
+                            if grads.pruning > 0.0 {
+                                g.add(Node::Stem(l))
+                            } else {
+                                curr
+                            }
+                        }
+                        Node::App { func, .. } => {
+                            if grads.pruning > 0.0 {
+                                func
+                            } else {
+                                curr
+                            }
+                        }
+                        _ => curr,
+                    };
+                    memo.insert(curr, new_node_id);
+                    continue;
+                }
+
+                let node = g.get(resolved_id).clone();
+                match node {
+                    Node::Float(_) | Node::Leaf | Node::Prim(_) | Node::Handle(_) => {
+                        memo.insert(curr, curr);
+                    }
+                    Node::Ind(inner) => {
+                        stack.push(Frame::Exit(curr, Node::Ind(inner)));
+                        stack.push(Frame::Enter(inner));
+                    }
+                    Node::Stem(inner) => {
+                        stack.push(Frame::Exit(curr, Node::Stem(inner)));
+                        stack.push(Frame::Enter(inner));
+                    }
+                    Node::Fork(l, r) => {
+                        stack.push(Frame::Exit(curr, Node::Fork(l, r)));
+                        stack.push(Frame::Enter(r));
+                        stack.push(Frame::Enter(l));
+                    }
+                    Node::App { func, args } => {
+                        stack.push(Frame::Exit(curr, Node::App { func, args: args.clone() }));
+                        for &arg in args.iter().rev() {
+                            stack.push(Frame::Enter(arg));
+                        }
+                        stack.push(Frame::Enter(func));
+                    }
+                }
+            }
+            Frame::Exit(curr, node) => {
+                if memo.contains_key(&curr) {
+                    continue;
+                }
+                let new_node_id = match node {
+                    Node::Ind(inner) => *memo.get(&inner).unwrap_or(&inner),
+                    Node::Stem(inner) => {
+                        let new_inner = *memo.get(&inner).unwrap_or(&inner);
+                        if new_inner == inner { curr } else { g.add(Node::Stem(new_inner)) }
+                    }
+                    Node::Fork(l, r) => {
+                        let new_l = *memo.get(&l).unwrap_or(&l);
+                        let new_r = *memo.get(&r).unwrap_or(&r);
+                        if new_l == l && new_r == r { curr } else { g.add(Node::Fork(new_l, new_r)) }
+                    }
+                    Node::App { func, args } => {
+                        let new_func = *memo.get(&func).unwrap_or(&func);
+                        let mut new_args = smallvec::SmallVec::new();
+                        let mut changed = new_func != func;
+                        for &arg in &args {
+                            let new_arg = *memo.get(&arg).unwrap_or(&arg);
+                            if new_arg != arg {
+                                changed = true;
+                            }
+                            new_args.push(new_arg);
+                        }
+                        if changed {
+                            g.add(Node::App { func: new_func, args: new_args })
+                        } else {
+                            curr
+                        }
+                    }
+                    _ => curr,
+                };
+                memo.insert(curr, new_node_id);
+            }
+        }
     }
 
-    let node = g.get(resolved_id).clone();
-    let new_node_id = match node {
-        Node::Float(_) | Node::Leaf | Node::Prim(_) | Node::Handle(_) => id,
-        
-        Node::Stem(inner) => {
-            let new_inner = mutate_rec(g, inner, target_id, gradients, lr, memo)?;
-            if new_inner == inner { id } else { g.add(Node::Stem(new_inner)) }
-        }
-        Node::Fork(l, r) => {
-            let new_l = mutate_rec(g, l, target_id, gradients, lr, memo)?;
-            let new_r = mutate_rec(g, r, target_id, gradients, lr, memo)?;
-            if new_l == l && new_r == r { id } else { g.add(Node::Fork(new_l, new_r)) }
-        }
-        Node::App { func, args } => {
-            let new_func = mutate_rec(g, func, target_id, gradients, lr, memo)?;
-            let mut new_args = smallvec::SmallVec::new();
-            let mut changed = new_func != func;
-            for &arg in &args {
-                let new_arg = mutate_rec(g, arg, target_id, gradients, lr, memo)?;
-                if new_arg != arg { changed = true; }
-                new_args.push(new_arg);
-            }
-            if changed {
-                g.add(Node::App { func: new_func, args: new_args })
-            } else {
-                id
-            }
-        }
-        Node::Ind(inner) => {
-             mutate_rec(g, inner, target_id, gradients, lr, memo)?
-        }
-    };
-    
-    memo.insert(id, new_node_id);
-    Ok(new_node_id)
+    Ok(*memo.get(&id).unwrap_or(&id))
 }

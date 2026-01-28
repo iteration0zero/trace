@@ -1,7 +1,7 @@
 use trace::arena::{Graph, NodeId, Node};
 use trace::parser::{Parser, ParseResult};
 use trace::engine::{reduce, unparse, EvalContext};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use trace::inference::InferenceEngine;
@@ -39,7 +39,6 @@ fn main() {
         ("is-leaf", "(fn z ((triage true (fn u false) (fn u (fn v false))) z))"),
         ("is-stem", "(fn z ((triage false (fn u true) (fn u (fn v false))) z))"),
         ("is-fork", "(fn z ((triage false (fn u false) (fn u (fn v true))) z))"),
-        // first/rest are now primitives
         ("d", "(fn x (n (n x)))"),
         // Fixpoint helpers from tree_book
         // ω = λ* z. λ* f. f (z z f)
@@ -52,12 +51,24 @@ fn main() {
         ("wait2", "(fn x (fn y (d (d (k (d (k y) (k x))) (d (d (k) (k n)) (k n))) (k (d i)))))"),
         // swap{f} = d{K f}d{d{K}(K△)}(K△)
         ("swap", "(fn f (d (k f) (d (d (k) (k n)) (k n))))"),
+        // head/tail from tree_book (triage on fork)
+        ("head", "(triage n n k)"),
+        ("tail", "(triage n n (k i))"),
+        ("first", "head"),
+        ("rest", "tail"),
         // Z{f} = wait{self_apply, d{wait1{self_apply}(K f)}}
         ("Z", "(fn f (wait self_apply (d (wait1 self_apply (k f)))))"),
         ("stem", "(fn x (n x))"),
         ("fork", "(fn a (fn b (n a b)))"),
         ("cons", "fork"),
         ("leaf", "n"),
+        // tree wrappers for primitives
+        ("add", "(fn x (fn y (+ x y)))"),
+        ("sub", "(fn x (fn y (- x y)))"),
+        ("mul", "(fn x (fn y (* x y)))"),
+        ("div", "(fn x (fn y (/ x y)))"),
+        ("if_tree", "(fn c (fn t (fn f (if c t f))))"),
+        ("trace_tree", "(fn x (trace x))"),
     ];
 
     // Library of learned/defined programs for curriculum learning
@@ -114,6 +125,7 @@ fn main() {
     );
 
     println!("Loading standard library...");
+    let std_names: HashSet<String> = prelude.iter().map(|(name, _)| (*name).to_string()).collect();
     for (name, code) in prelude {
         let mut p = Parser::new(code);
          if let Ok(ParseResult::Term(node)) = p.parse_toplevel(&mut g, Some(&env)) {
@@ -140,8 +152,10 @@ fn main() {
                  }
              }
              
-             // Add valid functions to library
-             library.push(reduced);
+             // Add valid functions to library, BUT EXCLUDE 'swap' so it must be learned
+             // if name != "swap" {
+             //     library.push(reduced);
+             // }
          } else {
             println!("Failed to load {}", name);
          }
@@ -221,12 +235,12 @@ fn main() {
 
         // Handle (learn-from ...)
         if trimmed.starts_with("(learn-from") {
-             handle_learn_from_command(trimmed, &mut g, &mut env, &mut library);
+             handle_learn_from_command(trimmed, &mut g, &mut env, &std_names, &mut library);
              continue;
         }
         // Handle (learn-self ...)
         if trimmed.starts_with("(learn-self") {
-             handle_learn_self_command(trimmed, &mut g, &mut env, &mut library);
+             handle_learn_self_command(trimmed, &mut g, &mut env, &std_names, &mut library);
              continue;
         }
 
@@ -279,11 +293,22 @@ fn main() {
 
 
 
-/// Handle learn-from command: (learn-from [epochs] ((in out) ...))
+fn filtered_env(env: &HashMap<String, NodeId>, allowed: &HashSet<String>) -> HashMap<String, NodeId> {
+    let mut out = HashMap::new();
+    for name in allowed {
+        if let Some(id) = env.get(name) {
+            out.insert(name.clone(), *id);
+        }
+    }
+    out
+}
+
+/// Handle learn-from command: (learn-from ((in out) ...) epochs [support_cap] [max_eval_steps])
 fn handle_learn_from_command(
     input: &str, 
     g: &mut Graph, 
     env: &mut HashMap<String, NodeId>,
+    std_names: &HashSet<String>,
     library: &mut Vec<NodeId>,
 ) {
     // Format: (learn-from ( (in1 out1) (in2 out2) ... ) epochs)
@@ -321,15 +346,28 @@ fn handle_learn_from_command(
         return;
     };
     
-    // Parse epochs and optional support cap from rest
+    // Parse epochs, optional support cap, and optional max_eval_steps from rest.
+    // Also accept key=value tokens like steps=500.
     let mut nums: Vec<usize> = Vec::new();
+    let mut max_eval_steps_override: Option<usize> = None;
     for tok in rest.split_whitespace() {
+        if let Some((key, value)) = tok.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if matches!(key, "steps" | "max_steps" | "max_eval_steps") {
+                if let Ok(n) = value.parse() {
+                    max_eval_steps_override = Some(n);
+                }
+            }
+            continue;
+        }
         if let Ok(n) = tok.parse() {
             nums.push(n);
         }
     }
     let epochs: usize = nums.get(0).cloned().unwrap_or(100);
     let support_cap: Option<usize> = nums.get(1).cloned();
+    let max_eval_steps: Option<usize> = max_eval_steps_override.or_else(|| nums.get(2).cloned());
     
     // Now parse the examples list content (without outer parens)
     let examples_content = examples_str.trim_start_matches('(').trim_end_matches(')').trim();
@@ -358,9 +396,9 @@ fn handle_learn_from_command(
         }
     }
 
+    let learn_env = filtered_env(env, std_names);
     // Parse each example pair: (input output) by parsing two terms inside
     let mut examples = Vec::new();
-    let mut ctx = EvalContext::default();
     for pair in pairs {
         let mut inner = pair.trim();
         if let Some(stripped) = inner.strip_prefix('(') {
@@ -371,22 +409,24 @@ fn handle_learn_from_command(
         }
         let inner = inner.trim();
         let mut p = Parser::new(inner);
-        let in_term = match p.parse_toplevel(g, Some(env)) {
+        let in_term = match p.parse_toplevel(g, Some(&learn_env)) {
             Ok(ParseResult::Term(t)) => t,
             _ => {
                 println!("Warning: Skipping malformed example pair: {}", inner);
                 continue;
             }
         };
-        let out_term = match p.parse_toplevel(g, Some(env)) {
+        let out_term = match p.parse_toplevel(g, Some(&learn_env)) {
             Ok(ParseResult::Term(t)) => t,
             _ => {
                 println!("Warning: Skipping malformed example pair: {}", inner);
                 continue;
             }
         };
-        let in_val = reduce(g, in_term, &mut ctx);
-        let out_val = reduce(g, out_term, &mut ctx);
+        let mut in_ctx = EvalContext::default();
+        let in_val = reduce(g, in_term, &mut in_ctx);
+        let mut out_ctx = EvalContext::default();
+        let out_val = reduce(g, out_term, &mut out_ctx);
         examples.push((in_val, out_val));
     }
     
@@ -395,24 +435,26 @@ fn handle_learn_from_command(
         return;
     }
 
-    println!("Parsed {} examples. Running IGTC synthesis for {} iterations...", examples.len(), epochs);
+    println!(
+        "Parsed {} examples. Running counterfactual synthesis for {} iterations...",
+        examples.len(),
+        epochs
+    );
     
-    // Use IGTC synthesizer
-    // Use IGTC synthesizer
-    let mut config = trace::learner::IgtcConfig::default();
+    // Use counterfactual single-candidate learner
+    let mut config = trace::learner::CounterfactualConfig::default();
     config.max_iterations = epochs;
     config.verbose = true;
-    config.log_every = 1;
-    config.debug_best_io = true;
     if let Some(cap) = support_cap {
-        config.max_support_size = cap;
+        config.max_edits_per_iter = cap;
     }
-    config.use_library_edits = true;
-    config.verbose = true;
-    config.log_every = 1;
-    // Keep other defaults which are now tuned (LR=0.01, support=500, edits=15)
+    if let Some(steps) = max_eval_steps {
+        config.max_eval_steps = steps.max(1);
+        println!("  max_eval_steps={}", config.max_eval_steps);
+    }
+    // Keep other defaults (thresholds, variance weight)
     
-    if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
+    if let Some(learned_node) = trace::learner::counterfactual_synthesize(g, examples, config) {
         println!("Success! Learned Node: {}", unparse(g, learned_node));
         
         env.insert("learned".to_string(), learned_node);
@@ -421,16 +463,17 @@ fn handle_learn_from_command(
         // Curriculum: add to library for future synthesis
         library.push(learned_node);
     } else {
-        println!("IGTC synthesis failed to converge.");
+        println!("Counterfactual synthesis failed to converge.");
     }
 }
 
-/// Handle learn-self command: (learn-self (t1 t2 ...) epochs)
+/// Handle learn-self command: (learn-self (t1 t2 ...) epochs [max_eval_steps])
 /// Builds examples where output = (t t) reduced, i.e. self-application.
 fn handle_learn_self_command(
     input: &str,
     g: &mut Graph,
     env: &mut HashMap<String, NodeId>,
+    std_names: &HashSet<String>,
     library: &mut Vec<NodeId>,
 ) {
     let inner = input.trim_start_matches("(learn-self").trim_end_matches(')').trim();
@@ -466,23 +509,34 @@ fn handle_learn_self_command(
     };
 
     let mut nums: Vec<usize> = Vec::new();
+    let mut max_eval_steps_override: Option<usize> = None;
     for tok in rest.split_whitespace() {
+        if let Some((key, value)) = tok.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if matches!(key, "steps" | "max_steps" | "max_eval_steps") {
+                if let Ok(n) = value.parse() {
+                    max_eval_steps_override = Some(n);
+                }
+            }
+            continue;
+        }
         if let Ok(n) = tok.parse() {
             nums.push(n);
         }
     }
     let epochs: usize = nums.get(0).cloned().unwrap_or(100);
-    let support_cap: Option<usize> = nums.get(1).cloned();
+    let max_eval_steps: Option<usize> = max_eval_steps_override.or_else(|| nums.get(1).cloned());
     let list_content = list_str.trim_start_matches('(').trim_end_matches(')').trim();
 
+    let learn_env = filtered_env(env, std_names);
     let mut examples = Vec::new();
     let mut p = Parser::new(list_content);
-    let mut ctx = EvalContext::default();
-    ctx.step_limit = 10_000;
-
     while p.has_more() {
-        if let Ok(ParseResult::Term(term)) = p.parse_toplevel(g, Some(env)) {
-            let input = reduce(g, term, &mut ctx);
+        if let Ok(ParseResult::Term(term)) = p.parse_toplevel(g, Some(&learn_env)) {
+            let mut in_ctx = EvalContext::default();
+            in_ctx.step_limit = 10_000;
+            let input = reduce(g, term, &mut in_ctx);
             let app = g.add(Node::App { func: input, args: smallvec::smallvec![input] });
             let mut out_ctx = EvalContext::default();
             out_ctx.step_limit = 10_000;
@@ -502,24 +556,25 @@ fn handle_learn_self_command(
         return;
     }
 
-    println!("Parsed {} examples. Running IGTC synthesis for {} iterations...", examples.len(), epochs);
+    println!(
+        "Parsed {} examples. Running counterfactual synthesis for {} iterations...",
+        examples.len(),
+        epochs
+    );
 
-    let mut config = trace::learner::IgtcConfig::default();
+    let mut config = trace::learner::CounterfactualConfig::default();
     config.max_iterations = epochs;
     config.verbose = true;
-    config.log_every = 1;
-    config.debug_best_io = true;
-    if let Some(cap) = support_cap {
-        config.max_support_size = cap;
-    }
-    config.use_library_edits = true;
+    let steps = max_eval_steps.unwrap_or(10_000);
+    config.max_eval_steps = steps.max(1);
+    println!("  max_eval_steps={}", config.max_eval_steps);
 
-    if let Some(learned_node) = trace::learner::igtc_synthesize_with_seeds(g, examples, config, &library) {
+    if let Some(learned_node) = trace::learner::counterfactual_synthesize(g, examples, config) {
         println!("Success! Learned Node: {}", unparse(g, learned_node));
         env.insert("learned".to_string(), learned_node);
         println!("Saved as 'learned'.");
         library.push(learned_node);
     } else {
-        println!("IGTC synthesis failed to converge.");
+        println!("Counterfactual synthesis failed to converge.");
     }
 }

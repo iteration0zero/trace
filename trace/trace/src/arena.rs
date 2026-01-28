@@ -2,6 +2,9 @@
 use smallvec::SmallVec;
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static GRAPH_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Lightweight NodeId
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -21,8 +24,8 @@ pub enum Node {
     Float(f64),
     Ind(NodeId),
     Handle(usize),
-    /// Application [f x] - Temporary during parsing/compilation, 
-    /// should be canonicalized to Stem/Fork if possible, but kept for Redexes.
+    /// TreeSequence: sequence of two or more trees (f x y ...).
+    /// The head tree is applied to the next tree to yield a new head.
     App {
         func: NodeId,
         args: SmallVec<[NodeId; 2]>,
@@ -80,6 +83,8 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     interner: FxHashMap<Node, NodeId>,
     interning: bool,
+    pub id: u64,
+    pub epoch: u64,
 }
 
 impl Graph {
@@ -88,6 +93,8 @@ impl Graph {
             nodes: Vec::with_capacity(1024),
             interner: FxHashMap::default(),
             interning: true,
+            id: GRAPH_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            epoch: 0,
         }
     }
 
@@ -97,6 +104,8 @@ impl Graph {
             nodes: Vec::with_capacity(1024),
             interner: FxHashMap::default(),
             interning: false,
+            id: GRAPH_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            epoch: 0,
         }
     }
 
@@ -107,34 +116,6 @@ impl Graph {
     }
 
     pub fn add(&mut self, node: Node) -> NodeId {
-        // Canonicalize partial applications of the node operator to factorable forms.
-        // In triage calculus: (n x) is Stem(x) and (n x y) is Fork(x, y).
-        let node = match node {
-             Node::App { func, ref args } => {
-                 if let Some(f_node) = self.nodes.get(func.0 as usize) {
-                      match f_node {
-                          Node::Leaf => {
-                              match args.len() {
-                                  1 => Node::Stem(*args.get(0).unwrap()),
-                                  2 => Node::Fork(*args.get(0).unwrap(), *args.get(1).unwrap()),
-                                  _ => node, // 3+ args remain an App redex
-                              }
-                          },
-                          Node::Stem(x) => {
-                              match args.len() {
-                                  1 => Node::Fork(*x, *args.get(0).unwrap()),
-                                  _ => node, // 2+ args remain an App redex
-                              }
-                          },
-                          _ => node
-                      }
-                 } else {
-                     node
-                 }
-             }
-             _ => node
-        };
-
         if self.interning {
             if let Some(&id) = self.interner.get(&node) {
                 return id;
@@ -146,6 +127,13 @@ impl Graph {
         if self.interning {
             self.interner.insert(node, id);
         }
+        id
+    }
+
+    /// Insert a node without canonicalization or interning (used for trace snapshots).
+    pub fn add_raw(&mut self, node: Node) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(node);
         id
     }
 
@@ -166,6 +154,7 @@ impl Graph {
     pub fn replace(&mut self, id: NodeId, node: Node) {
         if (id.0 as usize) < self.nodes.len() {
             self.nodes[id.0 as usize] = node;
+            self.epoch = self.epoch.wrapping_add(1);
         }
     }
 }

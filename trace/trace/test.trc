@@ -5,26 +5,24 @@
 (def inc (fn x (+ x 1.0)))
 (def bool_test (fn b (if b 1.0 2.0)))
 
-; Fixpoint building blocks from tree_book
-; d{x} = n (n x) is in prelude as d; self_apply = d{I}I is in prelude as self_apply
-; ω is in prelude as: (fn z (fn f (f (z z f))))
+; Inline values replacing defs
+; val_n = n
+; val_nn = (n n)
+; val_nnn = (n n n)
+; val_nnnn = (n (n n) (n n n))
+; val_complex = (n (n n) n)
 
 (id x)
-
 (inc 10.1)
 
-
-; First, lists are built with cons: (cons head tail)
-; nil is represented as n (Leaf)
-
-; Example 3: Learn "first" function (returns head of list)
+; Example 3: Learn "first"
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) 1.0)
   ((cons 3.0 (cons 4.0 n)) 3.0)
   ((cons (cons 1.0 (cons 2.0 n)) 3.0) (cons 1.0 (cons 2.0 n)))
-) 1000)
+) 100)
 
-; Example 4: Learn "rest" function (returns tail of list)
+; Example 4: Learn "rest"
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 n))
   ((cons 3.0 (cons 4.0 n)) (cons 4.0 n))
@@ -37,64 +35,79 @@
   ((cons 3.0 (cons 4.0 n)) (cons 4.0 (cons 3.0 n)))
 ) 2000)
 
-; ------------------------------------------------------------
-; Curriculum for implicit recursion / Z-combinator discovery
-; Each successful learn-from adds its result to the seed library.
-; ------------------------------------------------------------
+(learn-self (i 
+             (s k k)
+             n
+             (n n)
+             (n n n) 
+             (n (n n) (n n n))
+             first
+             rest
+             Z
+             (Z Z)
+             (s Z s s s Z s)
+             wait1
+             wait2
+             omega
+             (Z omega Z omega)
+             (s s)
+             s)
+          5000)
 
-; ------------------------------------------------------------
-; Z curriculum (parts -> Z-like -> reverse)
-; Each pair is written as: (input output)
-; ------------------------------------------------------------
-
-; Part 1: self-application only (w-part of Z)
-(learn-self (i (s k k)) 1500)
-
-; Part 2: omega curriculum (learn ω without mentioning it)
-; Learn function z ↦ λ* f. f (z z f)
+; Part 2: omega curriculum
+; Using literals instead of val_n
 (learn-from (
-  (n (fn f (f (n n f))))
-  ((n n) (fn f (f ((n n) (n n) f))))
-  ((n n n) (fn f (f ((n n n) (n n n) f))))
-  ((n (n n) (n n n)) (fn f (f ((n (n n) (n n n)) (n (n n) (n n n)) f))))
-) 2000)
+  (n (omega n))
+  ((n n) (omega (n n)))
+  ((n (n n) (n n n)) (omega (n (n n) (n n n))))
+  (k (omega k))
+  (i (omega i))
+  (s (omega s))
+  (Z (omega Z))
+  ((Z Z Z Z) (omega (Z Z Z Z)))
+  (((k k k) s s) (omega (((k k k) s s))))
+  (((k s k) s k) (omega (((k s k) s k))))
+  (((s k s) k s) (omega (((s k s) k s))))
+  ((s s s s s s s s s s s s) (omega (s s s s s s s s s s s s)))
+  (((n n n) ((n n) (n n n))) (omega ((n n n) ((n n) (n n n)))))
+  (wait2 (omega wait2))
+  (swap (omega swap))
+  (rest (omega rest))
+) 5000)
 
-; Part 3: wait1 delays one argument
-; Learn x ↦ λ* y. λ* z. x y z
+; Part 3: wait1
 (learn-from (
   (k (fn y (fn z (k y z))))
   (i (fn y (fn z (i y z))))
   ((k i) (fn y (fn z ((k i) y z))))
 ) 2000)
 
-; Part 4: wait2 delays two arguments
-; Learn x ↦ λ* y. λ* z. λ* w. x y z w
+; Part 4: wait2
 (learn-from (
   (k (fn y (fn z (fn w (k y z w)))))
   (i (fn y (fn z (fn w (i y z w)))))
   ((k i) (fn y (fn z (fn w ((k i) y z w)))))
 ) 2500)
 
-; Part 5: swap flips argument order
-; Learn f ↦ λ* x. λ* y. f y x
+; Part 5: swap
+; Use (swap input) to generate expected output
 (learn-from (
-  ((fn x (fn y (n x y))) (fn y (fn x (n x y))))
-  ((fn x (fn y ((n n) x y))) (fn y (fn x ((n n) x y))))
-  ((fn x (fn y ((n n n) x y))) (fn y (fn x ((n n n) x y))))
-  ((fn x (fn y (k x y))) (fn y (fn x (k x y))))
-  ((fn x (fn y (i x y))) (fn y (fn x (i x y))))
-  ((fn x (fn y ((n (n n) n) x y))) (fn y (fn x ((n (n n) n) x y))))
+  (n (swap n))
+  ((n n) (swap (n n)))
+  ((n n n) (swap (n n n)))
+  (k (swap k))
+  (i (swap i))
+  ((n (n n) n) (swap (n (n n) n)))
 ) 2000)
 
-; Part 6: Z with stable f = K g
-; For f = K g, Z f = g
+; Part 6: Z with stable f
 (learn-from (
   ((k i) i)
   ((k (k (cons 1.0 n))) (k (cons 1.0 n)))
   ((k (k (cons 2.0 n))) (k (cons 2.0 n)))
 ) 3000)
 
-; Reverse curriculum after Z-like stage
+; Reverse curriculum
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
   ((cons 5.0 (cons 6.0 n)) (cons 6.0 (cons 5.0 n)))
@@ -110,19 +123,19 @@
   ((cons 7.0 (cons 8.0 (cons 9.0 (cons 10.0 n)))) (cons 10.0 (cons 9.0 (cons 8.0 (cons 7.0 n)))))
 ) 4000)
 
-; Step A: swap two-element lists (reverse length-2)
+; Step A
 (learn-from (
   ((cons 1.0 (cons 2.0 n)) (cons 2.0 (cons 1.0 n)))
   ((cons 5.0 (cons 6.0 n)) (cons 6.0 (cons 5.0 n)))
 ) 1500)
 
-; Step B: reverse length-3 lists
+; Step B
 (learn-from (
   ((cons 1.0 (cons 2.0 (cons 3.0 n))) (cons 3.0 (cons 2.0 (cons 1.0 n))))
   ((cons 4.0 (cons 5.0 (cons 6.0 n))) (cons 6.0 (cons 5.0 (cons 4.0 n))))
 ) 2500)
 
-; Step C: reverse longer lists (forces recursion)
+; Step C
 (learn-from (
   ((cons 1.0 (cons 2.0 (cons 3.0 (cons 4.0 n)))) (cons 4.0 (cons 3.0 (cons 2.0 (cons 1.0 n)))))
   ((cons 7.0 (cons 8.0 (cons 9.0 (cons 10.0 n)))) (cons 10.0 (cons 9.0 (cons 8.0 (cons 7.0 n)))))

@@ -1,0 +1,10 @@
+; Part 5: swap
+; Use (swap input) to generate expected output
+(learn-from (
+  (n (swap n))
+  ((n n) (swap (n n)))
+  ((n n n) (swap (n n n)))
+  (k (swap k))
+  (i (swap i))
+  ((n (n n) n) (swap (n (n n) n)))
+) 30)

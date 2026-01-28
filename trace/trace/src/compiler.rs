@@ -1,8 +1,8 @@
 use crate::arena::{Graph, Node, NodeId};
-use crate::engine::{reduce, EvalContext};
 use smallvec::SmallVec;
+use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CompileTerm {
     Var(String),
     Const(NodeId),
@@ -11,11 +11,82 @@ pub enum CompileTerm {
 }
 
 // Bracket Expression (Internal)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum BExpr {
     Var(String),
     Const(NodeId),
     App(Box<BExpr>, Box<BExpr>),
+}
+
+impl fmt::Debug for CompileTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum Frame<'a> {
+            Enter(&'a CompileTerm),
+            Text(&'a str),
+            Owned(String),
+        }
+
+        let mut out = String::new();
+        let mut stack = vec![Frame::Enter(self)];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Text(s) => out.push_str(s),
+                Frame::Owned(s) => out.push_str(&s),
+                Frame::Enter(term) => match term {
+                    CompileTerm::Var(name) => out.push_str(&format!("Var({})", name)),
+                    CompileTerm::Const(id) => out.push_str(&format!("Const({:?})", id)),
+                    CompileTerm::App(fx, arg) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(arg));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(fx));
+                        stack.push(Frame::Text("App("));
+                    }
+                    CompileTerm::Lam(name, body) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(body));
+                        stack.push(Frame::Owned(format!("Lam({}, ", name)));
+                    }
+                },
+            }
+        }
+
+        f.write_str(&out)
+    }
+}
+
+impl fmt::Debug for BExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum Frame<'a> {
+            Enter(&'a BExpr),
+            Text(&'a str),
+            Owned(String),
+        }
+
+        let mut out = String::new();
+        let mut stack = vec![Frame::Enter(self)];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Text(s) => out.push_str(s),
+                Frame::Owned(s) => out.push_str(&s),
+                Frame::Enter(expr) => match expr {
+                    BExpr::Var(name) => out.push_str(&format!("Var({})", name)),
+                    BExpr::Const(id) => out.push_str(&format!("Const({:?})", id)),
+                    BExpr::App(l, r) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(r));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(l));
+                        stack.push(Frame::Text("App("));
+                    }
+                },
+            }
+        }
+
+        f.write_str(&out)
+    }
 }
 
 fn leaf_node(g: &mut Graph) -> NodeId {
@@ -44,13 +115,12 @@ fn s1_node(g: &mut Graph) -> NodeId {
 }
 
 fn i_node(g: &mut Graph) -> NodeId {
-    // I = S1 K K (reduces to a pure tree under triage rules)
-    let s1 = s1_node(g);
-    let k = k_node(g);
-    let app1 = g.add(Node::App { func: s1, args: smallvec::smallvec![k] });
-    let app2 = g.add(Node::App { func: app1, args: smallvec::smallvec![k] });
-    let mut ctx = EvalContext::default();
-    reduce(g, app2, &mut ctx)
+    // I tree (normal form of S K K) as a pure tree:
+    // (n (n (n n)) (n n)) = Fork(Stem(Stem(Leaf)), Stem(Leaf))
+    let leaf = g.add(Node::Leaf);
+    let stem = g.add(Node::Stem(leaf));
+    let stemstem = g.add(Node::Stem(stem));
+    g.add(Node::Fork(stemstem, stem))
 }
 
 fn s_node(g: &mut Graph) -> NodeId {
@@ -75,61 +145,161 @@ fn bexpr_i(g: &mut Graph) -> BExpr {
 }
 
 fn bexpr_occurs(name: &str, e: &BExpr) -> bool {
-    match e {
-        BExpr::Var(n) => n == name,
-        BExpr::Const(_) => false,
-        BExpr::App(l, r) => bexpr_occurs(name, l) || bexpr_occurs(name, r),
+    let mut stack = vec![e];
+    while let Some(curr) = stack.pop() {
+        match curr {
+            BExpr::Var(n) => {
+                if n == name {
+                    return true;
+                }
+            }
+            BExpr::Const(_) => {}
+            BExpr::App(l, r) => {
+                stack.push(&*r);
+                stack.push(&*l);
+            }
+        }
     }
+    false
 }
 
 fn bexpr_abstract(g: &mut Graph, name: &str, e: BExpr) -> BExpr {
-    if !bexpr_occurs(name, &e) {
-        bexpr_k(g, e)
-    } else {
-        match e {
-            BExpr::Var(_) => bexpr_i(g),
-            BExpr::App(l, r) => {
-                if let BExpr::Var(rn) = &*r {
-                    if rn == name && !bexpr_occurs(name, &*l) {
-                        return *l;
+    enum Frame {
+        Enter(BExpr),
+        ExitApp { left: BExpr, right: BExpr },
+    }
+
+    struct ResultItem {
+        expr: BExpr,
+        occurs: bool,
+    }
+
+    let mut stack = vec![Frame::Enter(e)];
+    let mut results: Vec<ResultItem> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(curr) => match curr {
+                BExpr::Var(n) => {
+                    let occurs = n == name;
+                    let expr = if occurs {
+                        bexpr_i(g)
+                    } else {
+                        bexpr_k(g, BExpr::Var(n))
+                    };
+                    results.push(ResultItem { expr, occurs });
+                }
+                BExpr::Const(n) => {
+                    results.push(ResultItem {
+                        expr: bexpr_k(g, BExpr::Const(n)),
+                        occurs: false,
+                    });
+                }
+                BExpr::App(l, r) => {
+                    let left = *l;
+                    let right = *r;
+                    stack.push(Frame::ExitApp { left: left.clone(), right: right.clone() });
+                    stack.push(Frame::Enter(right));
+                    stack.push(Frame::Enter(left));
+                }
+            },
+            Frame::ExitApp { left, right } => {
+                let right_res = results.pop().expect("missing rhs");
+                let left_res = results.pop().expect("missing lhs");
+                let occurs = left_res.occurs || right_res.occurs;
+                if !occurs {
+                    results.push(ResultItem {
+                        expr: bexpr_k(g, BExpr::App(Box::new(left), Box::new(right))),
+                        occurs,
+                    });
+                    continue;
+                }
+                if let BExpr::Var(rn) = &right {
+                    if rn == name && !left_res.occurs {
+                        results.push(ResultItem { expr: left, occurs });
+                        continue;
                     }
                 }
-                let al = bexpr_abstract(g, name, *l);
-                let ar = bexpr_abstract(g, name, *r);
-                bexpr_s(g, al, ar)
+                let expr = bexpr_s(g, left_res.expr, right_res.expr);
+                results.push(ResultItem { expr, occurs });
             }
-            BExpr::Const(_) => bexpr_k(g, e),
         }
     }
+
+    results.pop().map(|r| r.expr).unwrap_or_else(|| bexpr_i(g))
 }
 
 fn compile_to_bexpr(g: &mut Graph, t: CompileTerm) -> BExpr {
-    match t {
-        CompileTerm::Var(s) => BExpr::Var(s),
-        CompileTerm::Const(n) => BExpr::Const(n),
-        CompileTerm::App(f, a) => BExpr::App(
-            Box::new(compile_to_bexpr(g, *f)),
-            Box::new(compile_to_bexpr(g, *a))
-        ),
-        CompileTerm::Lam(name, body) => {
-            let body_bexpr = compile_to_bexpr(g, *body);
-            bexpr_abstract(g, &name, body_bexpr)
+    enum Frame {
+        Enter(CompileTerm),
+        ExitApp,
+        ExitLam(String),
+    }
+
+    let mut stack = vec![Frame::Enter(t)];
+    let mut results: Vec<BExpr> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(curr) => match curr {
+                CompileTerm::Var(s) => results.push(BExpr::Var(s)),
+                CompileTerm::Const(n) => results.push(BExpr::Const(n)),
+                CompileTerm::App(f, a) => {
+                    stack.push(Frame::ExitApp);
+                    stack.push(Frame::Enter(*a));
+                    stack.push(Frame::Enter(*f));
+                }
+                CompileTerm::Lam(name, body) => {
+                    stack.push(Frame::ExitLam(name));
+                    stack.push(Frame::Enter(*body));
+                }
+            },
+            Frame::ExitApp => {
+                let right = results.pop().expect("missing rhs");
+                let left = results.pop().expect("missing lhs");
+                results.push(BExpr::App(Box::new(left), Box::new(right)));
+            }
+            Frame::ExitLam(name) => {
+                let body = results.pop().expect("missing body");
+                results.push(bexpr_abstract(g, &name, body));
+            }
         }
     }
+
+    results.pop().expect("missing compiled bexpr")
 }
 
 fn bexpr_to_node(g: &mut Graph, e: BExpr) -> Result<NodeId, String> {
-    match e {
-        BExpr::Const(n) => Ok(n),
-        BExpr::App(l, r) => {
-            let ln = bexpr_to_node(g, *l)?;
-            let rn = bexpr_to_node(g, *r)?;
-            let mut args = SmallVec::new();
-            args.push(rn);
-            Ok(g.add(Node::App { func: ln, args }))
-        }
-        BExpr::Var(name) => Err(format!("Unbound variable: {}", name)),
+    enum Frame {
+        Enter(BExpr),
+        ExitApp,
     }
+
+    let mut stack = vec![Frame::Enter(e)];
+    let mut results: Vec<NodeId> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(curr) => match curr {
+                BExpr::Const(n) => results.push(n),
+                BExpr::Var(name) => return Err(format!("Unbound variable: {}", name)),
+                BExpr::App(l, r) => {
+                    stack.push(Frame::ExitApp);
+                    stack.push(Frame::Enter(*r));
+                    stack.push(Frame::Enter(*l));
+                }
+            },
+            Frame::ExitApp => {
+                let rn = results.pop().expect("missing rhs");
+                let ln = results.pop().expect("missing lhs");
+                let mut args = SmallVec::new();
+                args.push(rn);
+                results.push(g.add(Node::App { func: ln, args }));
+            }
+        }
+    }
+
+    Ok(*results.last().unwrap())
 }
 
 pub fn compile(g: &mut Graph, t: CompileTerm) -> Result<NodeId, String> {

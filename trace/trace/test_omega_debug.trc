@@ -1,0 +1,8 @@
+; Part 2: omega curriculum
+; Need to learn the omega combinator (or similar self-replicator logic)
+(learn-from (
+  (n (fn f (f (n n f))))
+  ((n n) (fn f (f ((n n) (n n) f))))
+  ((n n n) (fn f (f ((n n n) (n n n) f))))
+  ((n (n n) (n n n)) (fn f (f ((n (n n) (n n n)) (n (n n) (n n n)) f))))
+) 30)

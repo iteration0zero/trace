@@ -1,8 +1,9 @@
-use crate::arena::{NodeId, Primitive, Graph, Node};
+use crate::arena::{Graph, Node, NodeId, Primitive};
 use smallvec::smallvec;
 use std::collections::HashMap;
+use std::fmt;
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ProgramTemplate {
     Identity, // (I) or Leaf
     Constant(u64), // Float values mapped to u64 for template matching
@@ -22,81 +23,234 @@ pub enum ProgramTemplate {
     Stem(Box<ProgramTemplate>),
 }
 
+impl fmt::Debug for ProgramTemplate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum Frame<'a> {
+            Enter(&'a ProgramTemplate),
+            Text(&'a str),
+            Owned(String),
+        }
+
+        let mut out = String::new();
+        let mut stack = vec![Frame::Enter(self)];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Text(s) => out.push_str(s),
+                Frame::Owned(s) => out.push_str(&s),
+                Frame::Enter(curr) => match curr {
+                    ProgramTemplate::Identity => out.push_str("Identity"),
+                    ProgramTemplate::Constant(v) => out.push_str(&format!("Constant({})", v)),
+                    ProgramTemplate::Leaf => out.push_str("Leaf"),
+                    ProgramTemplate::Apply(p, inner) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(inner));
+                        stack.push(Frame::Owned(format!("Apply({:?}, ", p)));
+                    }
+                    ProgramTemplate::Binary(p, l, r) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(r));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(l));
+                        stack.push(Frame::Owned(format!("Binary({:?}, ", p)));
+                    }
+                    ProgramTemplate::Trinary(p, a, b, c) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(c));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(a));
+                        stack.push(Frame::Owned(format!("Trinary({:?}, ", p)));
+                    }
+                    ProgramTemplate::App(func, arg) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(arg));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(func));
+                        stack.push(Frame::Text("App("));
+                    }
+                    ProgramTemplate::Fork(l, r) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(r));
+                        stack.push(Frame::Text(", "));
+                        stack.push(Frame::Enter(l));
+                        stack.push(Frame::Text("Fork("));
+                    }
+                    ProgramTemplate::Stem(inner) => {
+                        stack.push(Frame::Text(")"));
+                        stack.push(Frame::Enter(inner));
+                        stack.push(Frame::Text("Stem("));
+                    }
+                },
+            }
+        }
+
+        f.write_str(&out)
+    }
+}
+
 impl ProgramTemplate {
     pub fn count_nodes(&self) -> usize {
-        match self {
-            ProgramTemplate::Identity => 1,
-            ProgramTemplate::Constant(_) => 1,
-            ProgramTemplate::Leaf => 1,
-            ProgramTemplate::Apply(_, inner) => 1 + inner.count_nodes(),
-            ProgramTemplate::Binary(_, l, r) => 1 + l.count_nodes() + r.count_nodes(),
-            ProgramTemplate::Trinary(_, a, b, c) => 1 + a.count_nodes() + b.count_nodes() + c.count_nodes(),
-            ProgramTemplate::App(f, a) => 1 + f.count_nodes() + a.count_nodes(),
-            ProgramTemplate::Fork(l, r) => 1 + l.count_nodes() + r.count_nodes(),
-            ProgramTemplate::Stem(inner) => 1 + inner.count_nodes(),
+        let mut count = 0usize;
+        let mut stack = vec![self];
+        while let Some(curr) = stack.pop() {
+            count += 1;
+            match curr {
+                ProgramTemplate::Identity
+                | ProgramTemplate::Constant(_)
+                | ProgramTemplate::Leaf => {}
+                ProgramTemplate::Apply(_, inner) => stack.push(inner),
+                ProgramTemplate::Binary(_, l, r) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                ProgramTemplate::Trinary(_, a, b, c) => {
+                    stack.push(c);
+                    stack.push(b);
+                    stack.push(a);
+                }
+                ProgramTemplate::App(f, a) => {
+                    stack.push(a);
+                    stack.push(f);
+                }
+                ProgramTemplate::Fork(l, r) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                ProgramTemplate::Stem(inner) => stack.push(inner),
+            }
         }
+        count
     }
     
     pub fn get_sub_templates(&self) -> Vec<&ProgramTemplate> {
         let mut subs = Vec::new();
-        match self {
-            ProgramTemplate::Apply(_, inner) => {
-                subs.push(self);
-                subs.extend(inner.get_sub_templates());
+        let mut stack = vec![self];
+        while let Some(curr) = stack.pop() {
+            subs.push(curr);
+            match curr {
+                ProgramTemplate::Apply(_, inner) => stack.push(inner),
+                ProgramTemplate::Binary(_, l, r) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                ProgramTemplate::Trinary(_, a, b, c) => {
+                    stack.push(c);
+                    stack.push(b);
+                    stack.push(a);
+                }
+                ProgramTemplate::App(f, a) => {
+                    stack.push(a);
+                    stack.push(f);
+                }
+                ProgramTemplate::Fork(l, r) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                ProgramTemplate::Stem(inner) => stack.push(inner),
+                ProgramTemplate::Identity
+                | ProgramTemplate::Constant(_)
+                | ProgramTemplate::Leaf => {}
             }
-            ProgramTemplate::Binary(_, l, r) => {
-                subs.push(self);
-                subs.extend(l.get_sub_templates());
-                subs.extend(r.get_sub_templates());
-            }
-            ProgramTemplate::Trinary(_, a, b, c) => {
-                subs.push(self);
-                subs.extend(a.get_sub_templates());
-                subs.extend(b.get_sub_templates());
-                subs.extend(c.get_sub_templates());
-            }
-            ProgramTemplate::App(f, a) => {
-                subs.push(self);
-                subs.extend(f.get_sub_templates());
-                subs.extend(a.get_sub_templates());
-            }
-            ProgramTemplate::Fork(l, r) => {
-                subs.push(self);
-                subs.extend(l.get_sub_templates());
-                subs.extend(r.get_sub_templates());
-            }
-            ProgramTemplate::Stem(inner) => {
-                subs.push(self);
-                subs.extend(inner.get_sub_templates());
-            }
-            _ => subs.push(self),
         }
         subs
     }
     
     pub fn replace_sub_template(&self, target: &ProgramTemplate, replacement: &ProgramTemplate) -> ProgramTemplate {
-        if self == target {
-            return replacement.clone();
+        enum Frame<'a> {
+            Enter(&'a ProgramTemplate),
+            ExitApply(Primitive),
+            ExitBinary(Primitive),
+            ExitTrinary(Primitive),
+            ExitApp,
+            ExitFork,
+            ExitStem,
         }
-        match self {
-            ProgramTemplate::Apply(p, inner) => ProgramTemplate::Apply(*p, Box::new(inner.replace_sub_template(target, replacement))),
-            ProgramTemplate::Binary(p, l, r) => ProgramTemplate::Binary(*p, 
-                Box::new(l.replace_sub_template(target, replacement)), 
-                Box::new(r.replace_sub_template(target, replacement))),
-            ProgramTemplate::Trinary(p, a, b, c) => ProgramTemplate::Trinary(*p, 
-                Box::new(a.replace_sub_template(target, replacement)),
-                Box::new(b.replace_sub_template(target, replacement)),
-                Box::new(c.replace_sub_template(target, replacement))),
-            ProgramTemplate::App(f, a) => ProgramTemplate::App(
-                Box::new(f.replace_sub_template(target, replacement)),
-                Box::new(a.replace_sub_template(target, replacement))),
-            ProgramTemplate::Fork(l, r) => ProgramTemplate::Fork(
-                Box::new(l.replace_sub_template(target, replacement)),
-                Box::new(r.replace_sub_template(target, replacement))),
-            ProgramTemplate::Stem(inner) => ProgramTemplate::Stem(
-                Box::new(inner.replace_sub_template(target, replacement))),
-            _ => self.clone(),
+
+        let mut stack = vec![Frame::Enter(self)];
+        let mut results: Vec<ProgramTemplate> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(curr) => {
+                    if curr == target {
+                        results.push(replacement.clone());
+                        continue;
+                    }
+                    match curr {
+                        ProgramTemplate::Identity
+                        | ProgramTemplate::Constant(_)
+                        | ProgramTemplate::Leaf => results.push(curr.clone()),
+                        ProgramTemplate::Apply(p, inner) => {
+                            stack.push(Frame::ExitApply(*p));
+                            stack.push(Frame::Enter(inner));
+                        }
+                        ProgramTemplate::Binary(p, l, r) => {
+                            stack.push(Frame::ExitBinary(*p));
+                            stack.push(Frame::Enter(r));
+                            stack.push(Frame::Enter(l));
+                        }
+                        ProgramTemplate::Trinary(p, a, b, c) => {
+                            stack.push(Frame::ExitTrinary(*p));
+                            stack.push(Frame::Enter(c));
+                            stack.push(Frame::Enter(b));
+                            stack.push(Frame::Enter(a));
+                        }
+                        ProgramTemplate::App(f, a) => {
+                            stack.push(Frame::ExitApp);
+                            stack.push(Frame::Enter(a));
+                            stack.push(Frame::Enter(f));
+                        }
+                        ProgramTemplate::Fork(l, r) => {
+                            stack.push(Frame::ExitFork);
+                            stack.push(Frame::Enter(r));
+                            stack.push(Frame::Enter(l));
+                        }
+                        ProgramTemplate::Stem(inner) => {
+                            stack.push(Frame::ExitStem);
+                            stack.push(Frame::Enter(inner));
+                        }
+                    }
+                }
+                Frame::ExitApply(p) => {
+                    let inner = results.pop().expect("missing inner");
+                    results.push(ProgramTemplate::Apply(p, Box::new(inner)));
+                }
+                Frame::ExitBinary(p) => {
+                    let right = results.pop().expect("missing right");
+                    let left = results.pop().expect("missing left");
+                    results.push(ProgramTemplate::Binary(p, Box::new(left), Box::new(right)));
+                }
+                Frame::ExitTrinary(p) => {
+                    let c = results.pop().expect("missing c");
+                    let b = results.pop().expect("missing b");
+                    let a = results.pop().expect("missing a");
+                    results.push(ProgramTemplate::Trinary(
+                        p,
+                        Box::new(a),
+                        Box::new(b),
+                        Box::new(c),
+                    ));
+                }
+                Frame::ExitApp => {
+                    let arg = results.pop().expect("missing arg");
+                    let func = results.pop().expect("missing func");
+                    results.push(ProgramTemplate::App(Box::new(func), Box::new(arg)));
+                }
+                Frame::ExitFork => {
+                    let right = results.pop().expect("missing right");
+                    let left = results.pop().expect("missing left");
+                    results.push(ProgramTemplate::Fork(Box::new(left), Box::new(right)));
+                }
+                Frame::ExitStem => {
+                    let inner = results.pop().expect("missing inner");
+                    results.push(ProgramTemplate::Stem(Box::new(inner)));
+                }
+            }
         }
+
+        results.pop().unwrap_or_else(|| self.clone())
     }
     pub fn get_root_key(&self) -> String {
         match self {
@@ -114,121 +268,285 @@ impl ProgramTemplate {
 }
 
 pub fn build_graph(g: &mut Graph, tmpl: &ProgramTemplate, arg: NodeId) -> NodeId {
-    match tmpl {
-        ProgramTemplate::Identity => arg,
-        ProgramTemplate::Constant(c) => g.add(Node::Float(*c as f64)),
-        ProgramTemplate::Apply(prim, inner) => {
-            let inner_node = build_graph(g, inner, arg);
-            let prim_node = g.add(Node::Prim(*prim));
-            g.add(Node::App { func: prim_node, args: smallvec![inner_node] })
-        },
-        ProgramTemplate::Binary(prim, l, r) => {
-            let ln = build_graph(g, l, arg);
-            let rn = build_graph(g, r, arg);
-            let prim_node = g.add(Node::Prim(*prim));
-            let pl = g.add(Node::App { func: prim_node, args: smallvec![ln] });
-            g.add(Node::App { func: pl, args: smallvec![rn] })
-        },
-        ProgramTemplate::Trinary(prim, a, b, c) => {
-            let an = build_graph(g, a, arg);
-            let bn = build_graph(g, b, arg);
-            let cn = build_graph(g, c, arg);
-            let prim_node = g.add(Node::Prim(*prim));
-            let pa = g.add(Node::App { func: prim_node, args: smallvec![an] });
-            let pab = g.add(Node::App { func: pa, args: smallvec![bn] });
-            g.add(Node::App { func: pab, args: smallvec![cn] })
-        },
-        ProgramTemplate::App(func_tmpl, arg_tmpl) => {
-             let func_node = build_graph(g, func_tmpl, arg);
-             let arg_node = build_graph(g, arg_tmpl, arg);
-             g.add(Node::App { func: func_node, args: smallvec![arg_node] })
-        },
-        ProgramTemplate::Leaf => g.add(Node::Leaf),
-        ProgramTemplate::Fork(l, r) => {
-            let ln = build_graph(g, l, arg);
-            let rn = build_graph(g, r, arg);
-            g.add(Node::Fork(ln, rn))
-        },
-        ProgramTemplate::Stem(inner) => {
-            let in_n = build_graph(g, inner, arg);
-            g.add(Node::Stem(in_n))
+    enum Frame<'a> {
+        Enter(&'a ProgramTemplate),
+        ExitApply(Primitive),
+        ExitBinary(Primitive),
+        ExitTrinary(Primitive),
+        ExitApp,
+        ExitFork,
+        ExitStem,
+    }
+
+    let mut stack = vec![Frame::Enter(tmpl)];
+    let mut results: Vec<NodeId> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(t) => match t {
+                ProgramTemplate::Identity => results.push(arg),
+                ProgramTemplate::Constant(c) => results.push(g.add(Node::Float(*c as f64))),
+                ProgramTemplate::Leaf => results.push(g.add(Node::Leaf)),
+                ProgramTemplate::Apply(prim, inner) => {
+                    stack.push(Frame::ExitApply(*prim));
+                    stack.push(Frame::Enter(inner));
+                }
+                ProgramTemplate::Binary(prim, l, r) => {
+                    stack.push(Frame::ExitBinary(*prim));
+                    stack.push(Frame::Enter(r));
+                    stack.push(Frame::Enter(l));
+                }
+                ProgramTemplate::Trinary(prim, a, b, c) => {
+                    stack.push(Frame::ExitTrinary(*prim));
+                    stack.push(Frame::Enter(c));
+                    stack.push(Frame::Enter(b));
+                    stack.push(Frame::Enter(a));
+                }
+                ProgramTemplate::App(func_tmpl, arg_tmpl) => {
+                    stack.push(Frame::ExitApp);
+                    stack.push(Frame::Enter(arg_tmpl));
+                    stack.push(Frame::Enter(func_tmpl));
+                }
+                ProgramTemplate::Fork(l, r) => {
+                    stack.push(Frame::ExitFork);
+                    stack.push(Frame::Enter(r));
+                    stack.push(Frame::Enter(l));
+                }
+                ProgramTemplate::Stem(inner) => {
+                    stack.push(Frame::ExitStem);
+                    stack.push(Frame::Enter(inner));
+                }
+            },
+            Frame::ExitApply(prim) => {
+                let inner_node = results.pop().expect("missing apply inner");
+                let prim_node = g.add(Node::Prim(prim));
+                results.push(g.add(Node::App { func: prim_node, args: smallvec![inner_node] }));
+            }
+            Frame::ExitBinary(prim) => {
+                let rn = results.pop().expect("missing binary right");
+                let ln = results.pop().expect("missing binary left");
+                let prim_node = g.add(Node::Prim(prim));
+                let pl = g.add(Node::App { func: prim_node, args: smallvec![ln] });
+                results.push(g.add(Node::App { func: pl, args: smallvec![rn] }));
+            }
+            Frame::ExitTrinary(prim) => {
+                let cn = results.pop().expect("missing trinary c");
+                let bn = results.pop().expect("missing trinary b");
+                let an = results.pop().expect("missing trinary a");
+                let prim_node = g.add(Node::Prim(prim));
+                let pa = g.add(Node::App { func: prim_node, args: smallvec![an] });
+                let pab = g.add(Node::App { func: pa, args: smallvec![bn] });
+                results.push(g.add(Node::App { func: pab, args: smallvec![cn] }));
+            }
+            Frame::ExitApp => {
+                let arg_node = results.pop().expect("missing app arg");
+                let func_node = results.pop().expect("missing app func");
+                results.push(g.add(Node::App { func: func_node, args: smallvec![arg_node] }));
+            }
+            Frame::ExitFork => {
+                let rn = results.pop().expect("missing fork right");
+                let ln = results.pop().expect("missing fork left");
+                results.push(g.add(Node::Fork(ln, rn)));
+            }
+            Frame::ExitStem => {
+                let in_n = results.pop().expect("missing stem inner");
+                results.push(g.add(Node::Stem(in_n)));
+            }
         }
     }
+
+    results.pop().unwrap_or(arg)
 }
 
 pub fn build_graph_with_map(g: &mut Graph, tmpl: &ProgramTemplate, arg: NodeId, map: &mut HashMap<NodeId, ProgramTemplate>) -> NodeId {
-    let node_id = match tmpl {
-        ProgramTemplate::Identity => arg,
-        ProgramTemplate::Constant(c) => g.add(Node::Float(*c as f64)),
-        ProgramTemplate::Apply(prim, inner) => {
-            let inner_node = build_graph_with_map(g, inner, arg, map);
-            let prim_node = g.add(Node::Prim(*prim));
-            g.add(Node::App { func: prim_node, args: smallvec![inner_node] })
-        },
-        ProgramTemplate::Binary(prim, l, r) => {
-            let ln = build_graph_with_map(g, l, arg, map);
-            let rn = build_graph_with_map(g, r, arg, map);
-            let prim_node = g.add(Node::Prim(*prim));
-            let pl = g.add(Node::App { func: prim_node, args: smallvec![ln] });
-            g.add(Node::App { func: pl, args: smallvec![rn] })
-        },
-        ProgramTemplate::Trinary(prim, a, b, c) => {
-            let an = build_graph_with_map(g, a, arg, map);
-            let bn = build_graph_with_map(g, b, arg, map);
-            let cn = build_graph_with_map(g, c, arg, map);
-            let prim_node = g.add(Node::Prim(*prim));
-            let pa = g.add(Node::App { func: prim_node, args: smallvec![an] });
-            let pab = g.add(Node::App { func: pa, args: smallvec![bn] });
-            g.add(Node::App { func: pab, args: smallvec![cn] })
-        },
-        ProgramTemplate::App(func_tmpl, arg_tmpl) => {
-             let func_node = build_graph_with_map(g, func_tmpl, arg, map);
-             let arg_node = build_graph_with_map(g, arg_tmpl, arg, map);
-             g.add(Node::App { func: func_node, args: smallvec![arg_node] })
-        },
-        ProgramTemplate::Leaf => g.add(Node::Leaf),
-        ProgramTemplate::Fork(l, r) => {
-            let ln = build_graph_with_map(g, l, arg, map);
-            let rn = build_graph_with_map(g, r, arg, map);
-            g.add(Node::Fork(ln, rn))
-        },
-        ProgramTemplate::Stem(inner) => {
-            let in_n = build_graph_with_map(g, inner, arg, map);
-            g.add(Node::Stem(in_n))
+    enum Frame<'a> {
+        Enter(&'a ProgramTemplate),
+        ExitApply(&'a ProgramTemplate, Primitive),
+        ExitBinary(&'a ProgramTemplate, Primitive),
+        ExitTrinary(&'a ProgramTemplate, Primitive),
+        ExitApp(&'a ProgramTemplate),
+        ExitFork(&'a ProgramTemplate),
+        ExitStem(&'a ProgramTemplate),
+    }
+
+    let mut stack = vec![Frame::Enter(tmpl)];
+    let mut results: Vec<NodeId> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(t) => match t {
+                ProgramTemplate::Identity => {
+                    results.push(arg);
+                    map.insert(arg, t.clone());
+                }
+                ProgramTemplate::Constant(c) => {
+                    let node_id = g.add(Node::Float(*c as f64));
+                    results.push(node_id);
+                    map.insert(node_id, t.clone());
+                }
+                ProgramTemplate::Leaf => {
+                    let node_id = g.add(Node::Leaf);
+                    results.push(node_id);
+                    map.insert(node_id, t.clone());
+                }
+                ProgramTemplate::Apply(prim, inner) => {
+                    stack.push(Frame::ExitApply(t, *prim));
+                    stack.push(Frame::Enter(inner));
+                }
+                ProgramTemplate::Binary(prim, l, r) => {
+                    stack.push(Frame::ExitBinary(t, *prim));
+                    stack.push(Frame::Enter(r));
+                    stack.push(Frame::Enter(l));
+                }
+                ProgramTemplate::Trinary(prim, a, b, c) => {
+                    stack.push(Frame::ExitTrinary(t, *prim));
+                    stack.push(Frame::Enter(c));
+                    stack.push(Frame::Enter(b));
+                    stack.push(Frame::Enter(a));
+                }
+                ProgramTemplate::App(func_tmpl, arg_tmpl) => {
+                    stack.push(Frame::ExitApp(t));
+                    stack.push(Frame::Enter(arg_tmpl));
+                    stack.push(Frame::Enter(func_tmpl));
+                }
+                ProgramTemplate::Fork(l, r) => {
+                    stack.push(Frame::ExitFork(t));
+                    stack.push(Frame::Enter(r));
+                    stack.push(Frame::Enter(l));
+                }
+                ProgramTemplate::Stem(inner) => {
+                    stack.push(Frame::ExitStem(t));
+                    stack.push(Frame::Enter(inner));
+                }
+            },
+            Frame::ExitApply(t, prim) => {
+                let inner_node = results.pop().expect("missing apply inner");
+                let prim_node = g.add(Node::Prim(prim));
+                let node_id = g.add(Node::App { func: prim_node, args: smallvec![inner_node] });
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
+            Frame::ExitBinary(t, prim) => {
+                let rn = results.pop().expect("missing binary right");
+                let ln = results.pop().expect("missing binary left");
+                let prim_node = g.add(Node::Prim(prim));
+                let pl = g.add(Node::App { func: prim_node, args: smallvec![ln] });
+                let node_id = g.add(Node::App { func: pl, args: smallvec![rn] });
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
+            Frame::ExitTrinary(t, prim) => {
+                let cn = results.pop().expect("missing trinary c");
+                let bn = results.pop().expect("missing trinary b");
+                let an = results.pop().expect("missing trinary a");
+                let prim_node = g.add(Node::Prim(prim));
+                let pa = g.add(Node::App { func: prim_node, args: smallvec![an] });
+                let pab = g.add(Node::App { func: pa, args: smallvec![bn] });
+                let node_id = g.add(Node::App { func: pab, args: smallvec![cn] });
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
+            Frame::ExitApp(t) => {
+                let arg_node = results.pop().expect("missing app arg");
+                let func_node = results.pop().expect("missing app func");
+                let node_id = g.add(Node::App { func: func_node, args: smallvec![arg_node] });
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
+            Frame::ExitFork(t) => {
+                let rn = results.pop().expect("missing fork right");
+                let ln = results.pop().expect("missing fork left");
+                let node_id = g.add(Node::Fork(ln, rn));
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
+            Frame::ExitStem(t) => {
+                let in_n = results.pop().expect("missing stem inner");
+                let node_id = g.add(Node::Stem(in_n));
+                results.push(node_id);
+                map.insert(node_id, t.clone());
+            }
         }
-    };
-    
-    map.insert(node_id, tmpl.clone());
-    node_id
+    }
+
+    results.pop().unwrap_or(arg)
 }
 
 pub fn node_to_template(g: &Graph, node: NodeId) -> Option<ProgramTemplate> {
-    match g.get(node) {
-        Node::Leaf => Some(ProgramTemplate::Leaf), // Or Identity? Leaf is Leaf. Identity is usage.
-        Node::Float(f) => Some(ProgramTemplate::Constant(*f as u64)), 
-        Node::Prim(_) => None, 
-        Node::Fork(l, r) => {
-            let lt = node_to_template(g, *l)?;
-            let rt = node_to_template(g, *r)?;
-            Some(ProgramTemplate::Fork(Box::new(lt), Box::new(rt)))
-        },
-        Node::Stem(inner) => {
-            let it = node_to_template(g, *inner)?;
-            Some(ProgramTemplate::Stem(Box::new(it)))
-        },
-        Node::App { func, args } => {
-            if args.len() != 1 { return None; }
-            let arg = args[0];
-            
-            if let Node::Prim(p) = g.get(*func) {
-                 let inner = node_to_template(g, arg)?;
-                 Some(ProgramTemplate::Apply(*p, Box::new(inner)))
-            } else {
-                let f_tmpl = node_to_template(g, *func)?;
-                let a_tmpl = node_to_template(g, arg)?;
-                Some(ProgramTemplate::App(Box::new(f_tmpl), Box::new(a_tmpl)))
+    enum Frame {
+        Enter(NodeId),
+        ExitFork,
+        ExitStem,
+        ExitApply(Primitive),
+        ExitApp,
+    }
+
+    let mut stack = vec![Frame::Enter(node)];
+    let mut results: Vec<ProgramTemplate> = Vec::new();
+    let mut ok = true;
+
+    while let Some(frame) = stack.pop() {
+        if !ok {
+            break;
+        }
+        match frame {
+            Frame::Enter(id) => match g.get(id) {
+                Node::Leaf => results.push(ProgramTemplate::Leaf),
+                Node::Float(f) => results.push(ProgramTemplate::Constant(*f as u64)),
+                Node::Prim(_) => ok = false,
+                Node::Fork(l, r) => {
+                    stack.push(Frame::ExitFork);
+                    stack.push(Frame::Enter(*r));
+                    stack.push(Frame::Enter(*l));
+                }
+                Node::Stem(inner) => {
+                    stack.push(Frame::ExitStem);
+                    stack.push(Frame::Enter(*inner));
+                }
+                Node::App { func, args } => {
+                    if args.len() != 1 {
+                        ok = false;
+                        continue;
+                    }
+                    let arg = args[0];
+                    match g.get(*func) {
+                        Node::Prim(p) => {
+                            stack.push(Frame::ExitApply(*p));
+                            stack.push(Frame::Enter(arg));
+                        }
+                        _ => {
+                            stack.push(Frame::ExitApp);
+                            stack.push(Frame::Enter(arg));
+                            stack.push(Frame::Enter(*func));
+                        }
+                    }
+                }
+                _ => ok = false,
+            },
+            Frame::ExitFork => {
+                let right = results.pop()?;
+                let left = results.pop()?;
+                results.push(ProgramTemplate::Fork(Box::new(left), Box::new(right)));
+            }
+            Frame::ExitStem => {
+                let inner = results.pop()?;
+                results.push(ProgramTemplate::Stem(Box::new(inner)));
+            }
+            Frame::ExitApply(p) => {
+                let inner = results.pop()?;
+                results.push(ProgramTemplate::Apply(p, Box::new(inner)));
+            }
+            Frame::ExitApp => {
+                let arg_tmpl = results.pop()?;
+                let func_tmpl = results.pop()?;
+                results.push(ProgramTemplate::App(Box::new(func_tmpl), Box::new(arg_tmpl)));
             }
         }
-        _ => None,
+    }
+
+    if !ok {
+        None
+    } else {
+        results.pop()
     }
 }

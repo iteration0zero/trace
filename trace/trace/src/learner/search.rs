@@ -46,6 +46,7 @@ pub fn evolve_with_graph(
             let (root, blamer, choices) = genome.instantiate(g, true); // Sampled
             
             // 2. Prepare Application
+            let base_nodes = g.nodes.len();
             let app = g.add(Node::App { func: root, args: smallvec::smallvec![*inp] });
             
             // 3. Run with Trace
@@ -53,10 +54,15 @@ pub fn evolve_with_graph(
             let mut ctx = EvalContext {
                 steps: 0,
                 step_limit: 500,
+                node_limit: 0,
+                node_limit_hit: false,
+                step_limit_hit: false,
                 depth: 0,
                 depth_limit: 1000,
                 trace: Some(&mut trace),
-                igtc_trace: None,
+                exec_trace: None,
+                redex_cache: None,
+                base_nodes,
             };
             
             let res = reduce(g, app, &mut ctx);
@@ -122,25 +128,47 @@ fn reconstruct_gene(sg: &SoftGenome) -> Gene {
 
 fn build_gene_tree<'a, I>(depth: usize, leaves: &mut I) -> Gene
 where I: Iterator<Item = &'a super::soft::SoftGene> {
-    if depth == 0 {
-        if let Some(soft_gene) = leaves.next() {
-            let choice = argmax(&soft_gene.logits);
-            match choice {
-                0 => Gene::S,
-                1 => Gene::K,
-                2 => Gene::I,
-                3 => Gene::Leaf,
-                4 => Gene::First,
-                5 => Gene::Rest,
-                _ => Gene::Leaf
-            }
-        } else {
-            Gene::Leaf
-        }
-    } else {
-        Gene::App(
-            Box::new(build_gene_tree(depth - 1, leaves)),
-            Box::new(build_gene_tree(depth - 1, leaves))
-        )
+    enum Frame {
+        Enter(usize),
+        ExitApp,
     }
+
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut results: Vec<Gene> = Vec::new();
+    stack.push(Frame::Enter(depth));
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(d) => {
+                if d == 0 {
+                    let gene = if let Some(soft_gene) = leaves.next() {
+                        let choice = argmax(&soft_gene.logits);
+                        match choice {
+                            0 => Gene::S,
+                            1 => Gene::K,
+                            2 => Gene::I,
+                            3 => Gene::Leaf,
+                            4 => Gene::First,
+                            5 => Gene::Rest,
+                            _ => Gene::Leaf,
+                        }
+                    } else {
+                        Gene::Leaf
+                    };
+                    results.push(gene);
+                } else {
+                    stack.push(Frame::ExitApp);
+                    stack.push(Frame::Enter(d - 1));
+                    stack.push(Frame::Enter(d - 1));
+                }
+            }
+            Frame::ExitApp => {
+                let right = results.pop().unwrap_or(Gene::Leaf);
+                let left = results.pop().unwrap_or(Gene::Leaf);
+                results.push(Gene::App(Box::new(left), Box::new(right)));
+            }
+        }
+    }
+
+    results.pop().unwrap_or(Gene::Leaf)
 }

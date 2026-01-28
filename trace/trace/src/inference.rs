@@ -25,54 +25,179 @@ pub struct InferenceEngine {
 
 impl InferenceEngine {
     fn subst_generic(ty: &Type, name: &str, replacement: &Type) -> Type {
-        match ty {
-            Type::Generic(n) if n == name => replacement.clone(),
-            Type::Forall(n, body) => {
-                if n == name {
-                    Type::Forall(n.clone(), body.clone())
-                } else {
-                    Type::Forall(n.clone(), Box::new(Self::subst_generic(body, name, replacement)))
+        enum Frame<'a> {
+            Enter(&'a Type),
+            ExitForall(String),
+            ExitArrow,
+            ExitStem,
+            ExitPair,
+            ExitUnion(usize),
+            ExitRec(usize),
+        }
+
+        let mut stack = vec![Frame::Enter(ty)];
+        let mut results: Vec<Type> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(t) => match t {
+                    Type::Generic(n) if n == name => results.push(replacement.clone()),
+                    Type::Forall(n, body) => {
+                        if n == name {
+                            results.push(Type::Forall(n.clone(), body.clone()));
+                        } else {
+                            stack.push(Frame::ExitForall(n.clone()));
+                            stack.push(Frame::Enter(body));
+                        }
+                    }
+                    Type::Arrow(a, b) => {
+                        stack.push(Frame::ExitArrow);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Stem(a) => {
+                        stack.push(Frame::ExitStem);
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Pair(a, b) => {
+                        stack.push(Frame::ExitPair);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Union(ts) => {
+                        stack.push(Frame::ExitUnion(ts.len()));
+                        for t in ts.iter().rev() {
+                            stack.push(Frame::Enter(t));
+                        }
+                    }
+                    Type::Rec(id, body) => {
+                        stack.push(Frame::ExitRec(*id));
+                        stack.push(Frame::Enter(body));
+                    }
+                    _ => results.push(t.clone()),
+                },
+                Frame::ExitForall(n) => {
+                    let body = results.pop().expect("missing forall body");
+                    results.push(Type::Forall(n, Box::new(body)));
+                }
+                Frame::ExitArrow => {
+                    let b = results.pop().expect("missing arrow rhs");
+                    let a = results.pop().expect("missing arrow lhs");
+                    results.push(Type::Arrow(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitStem => {
+                    let a = results.pop().expect("missing stem inner");
+                    results.push(Type::Stem(Box::new(a)));
+                }
+                Frame::ExitPair => {
+                    let b = results.pop().expect("missing pair rhs");
+                    let a = results.pop().expect("missing pair lhs");
+                    results.push(Type::Pair(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitUnion(count) => {
+                    let mut ts = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        ts.push(results.pop().expect("missing union member"));
+                    }
+                    ts.reverse();
+                    results.push(Type::Union(ts));
+                }
+                Frame::ExitRec(id) => {
+                    let body = results.pop().expect("missing rec body");
+                    results.push(Type::Rec(id, Box::new(body)));
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(Self::subst_generic(a, name, replacement)),
-                Box::new(Self::subst_generic(b, name, replacement))
-            ),
-            Type::Stem(a) => Type::Stem(Box::new(Self::subst_generic(a, name, replacement))),
-            Type::Pair(a, b) => Type::Pair(
-                Box::new(Self::subst_generic(a, name, replacement)),
-                Box::new(Self::subst_generic(b, name, replacement))
-            ),
-            Type::Union(ts) => Type::Union(ts.iter().map(|t| Self::subst_generic(t, name, replacement)).collect()),
-            Type::Rec(_id, body) => Type::Rec(*_id, Box::new(Self::subst_generic(body, name, replacement))),
-            _ => ty.clone(),
         }
+
+        results.pop().unwrap_or_else(|| ty.clone())
     }
 
     fn subst_rec(ty: &Type, id: usize, replacement: &Type) -> Type {
-        match ty {
-            Type::RecVar(i) if *i == id => replacement.clone(),
-            Type::Rec(i, body) => {
-                // If nested Rec shadows ID, stop.
-                if *i == id {
-                    Type::Rec(*i, body.clone())
-                } else {
-                    Type::Rec(*i, Box::new(Self::subst_rec(body, id, replacement)))
+        enum Frame<'a> {
+            Enter(&'a Type),
+            ExitForall(String),
+            ExitArrow,
+            ExitStem,
+            ExitPair,
+            ExitUnion(usize),
+            ExitRec(usize),
+        }
+
+        let mut stack = vec![Frame::Enter(ty)];
+        let mut results: Vec<Type> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(t) => match t {
+                    Type::RecVar(i) if *i == id => results.push(replacement.clone()),
+                    Type::Rec(i, body) => {
+                        if *i == id {
+                            results.push(Type::Rec(*i, body.clone()));
+                        } else {
+                            stack.push(Frame::ExitRec(*i));
+                            stack.push(Frame::Enter(body));
+                        }
+                    }
+                    Type::Arrow(a, b) => {
+                        stack.push(Frame::ExitArrow);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Stem(a) => {
+                        stack.push(Frame::ExitStem);
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Pair(a, b) => {
+                        stack.push(Frame::ExitPair);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Union(ts) => {
+                        stack.push(Frame::ExitUnion(ts.len()));
+                        for t in ts.iter().rev() {
+                            stack.push(Frame::Enter(t));
+                        }
+                    }
+                    Type::Forall(n, body) => {
+                        stack.push(Frame::ExitForall(n.clone()));
+                        stack.push(Frame::Enter(body));
+                    }
+                    _ => results.push(t.clone()),
+                },
+                Frame::ExitForall(n) => {
+                    let body = results.pop().expect("missing forall body");
+                    results.push(Type::Forall(n, Box::new(body)));
+                }
+                Frame::ExitArrow => {
+                    let b = results.pop().expect("missing arrow rhs");
+                    let a = results.pop().expect("missing arrow lhs");
+                    results.push(Type::Arrow(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitStem => {
+                    let a = results.pop().expect("missing stem inner");
+                    results.push(Type::Stem(Box::new(a)));
+                }
+                Frame::ExitPair => {
+                    let b = results.pop().expect("missing pair rhs");
+                    let a = results.pop().expect("missing pair lhs");
+                    results.push(Type::Pair(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitUnion(count) => {
+                    let mut ts = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        ts.push(results.pop().expect("missing union member"));
+                    }
+                    ts.reverse();
+                    results.push(Type::Union(ts));
+                }
+                Frame::ExitRec(rec_id) => {
+                    let body = results.pop().expect("missing rec body");
+                    results.push(Type::Rec(rec_id, Box::new(body)));
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(Self::subst_rec(a, id, replacement)),
-                Box::new(Self::subst_rec(b, id, replacement))
-            ),
-            Type::Stem(a) => Type::Stem(Box::new(Self::subst_rec(a, id, replacement))),
-            Type::Pair(a, b) => Type::Pair(
-                Box::new(Self::subst_rec(a, id, replacement)),
-                Box::new(Self::subst_rec(b, id, replacement))
-            ),
-            Type::Union(ts) => Type::Union(ts.iter().map(|t| Self::subst_rec(t, id, replacement)).collect()),
-            Type::Forall(n, body) => Type::Forall(n.clone(), Box::new(Self::subst_rec(body, id, replacement))),
-            _ => ty.clone(),
         }
+
+        results.pop().unwrap_or_else(|| ty.clone())
     }
 
     pub fn fresh_skolem(&mut self, name: &str) -> Type {
@@ -116,66 +241,89 @@ impl InferenceEngine {
         env: &TypeEnv, 
         node_types: &mut HashMap<NodeId, Type>
     ) -> Result<(), String> {
-        if node_types.contains_key(&node) {
-            return Ok(());
+        enum Frame {
+            Enter(NodeId),
+            ExitStem(NodeId, NodeId),
+            ExitFork(NodeId, NodeId, NodeId),
+            ExitApp(NodeId, NodeId, Vec<NodeId>),
         }
-        
-        let ty = self.fresh_var();
-        node_types.insert(node, ty.clone());
 
-        // Special-case typings for canonical tree combinators
-        if let Some(special_ty) = env.specials.get(&node.0).cloned() {
-            self.constraints.push(Constraint::Equality(ty, special_ty));
-            return Ok(());
-        }
-        
-        match g.get(node) {
-            Node::Leaf => {
-                self.constraints.push(Constraint::Equality(ty, Type::Leaf));
-            }
-            Node::Float(_) => {
-                self.constraints.push(Constraint::Equality(ty, Type::Float));
-            }
-            Node::Stem(inner) => {
-                self.generate_constraints(g, *inner, env, node_types)?;
-                let inner_ty = node_types.get(inner).unwrap().clone();
-                self.constraints.push(Constraint::Equality(ty, Type::Stem(Box::new(inner_ty))));
-            }
-            Node::Fork(head, tail) => {
-                self.generate_constraints(g, *head, env, node_types)?;
-                self.generate_constraints(g, *tail, env, node_types)?;
-                
-                let h_ty = node_types.get(head).unwrap().clone();
-                let t_ty = node_types.get(tail).unwrap().clone();
-                
-                // Construct the Pair type
-                let pair_ty = Type::Pair(Box::new(h_ty), Box::new(t_ty));
-                self.constraints.push(Constraint::Equality(ty, pair_ty));
-            }
-            Node::App { func, args } => {
-                self.generate_constraints(g, *func, env, node_types)?;
-                let func_ty = node_types.get(func).unwrap().clone();
-                
-                let mut curr_ty = func_ty;
-                
-                for arg in args {
-                    self.generate_constraints(g, *arg, env, node_types)?;
-                    let arg_ty = node_types.get(arg).unwrap().clone();
-                    let res_ty = self.fresh_var();
-                    
-                    self.constraints.push(Constraint::Applicable(curr_ty.clone(), arg_ty, res_ty.clone()));
-                    curr_ty = res_ty;
+        let mut stack = vec![Frame::Enter(node)];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(n) => {
+                    if node_types.contains_key(&n) {
+                        continue;
+                    }
+
+                    let ty = self.fresh_var();
+                    node_types.insert(n, ty.clone());
+
+                    if let Some(special_ty) = env.specials.get(&n.0).cloned() {
+                        self.constraints.push(Constraint::Equality(ty, special_ty));
+                        continue;
+                    }
+
+                    match g.get(n) {
+                        Node::Leaf => {
+                            self.constraints.push(Constraint::Equality(ty, Type::Leaf));
+                        }
+                        Node::Float(_) => {
+                            self.constraints.push(Constraint::Equality(ty, Type::Float));
+                        }
+                        Node::Stem(inner) => {
+                            stack.push(Frame::ExitStem(n, *inner));
+                            stack.push(Frame::Enter(*inner));
+                        }
+                        Node::Fork(head, tail) => {
+                            stack.push(Frame::ExitFork(n, *head, *tail));
+                            stack.push(Frame::Enter(*tail));
+                            stack.push(Frame::Enter(*head));
+                        }
+                        Node::App { func, args } => {
+                            let mut arg_list: Vec<NodeId> = args.iter().copied().collect();
+                            stack.push(Frame::ExitApp(n, *func, arg_list.clone()));
+                            stack.push(Frame::Enter(*func));
+                            arg_list.reverse();
+                            for arg in arg_list {
+                                stack.push(Frame::Enter(arg));
+                            }
+                        }
+                        Node::Prim(p) => {
+                            let prim_ty = self.get_primitive_type(*p);
+                            self.constraints.push(Constraint::Equality(ty, prim_ty));
+                        }
+                        _ => {}
+                    }
                 }
-                
-                self.constraints.push(Constraint::Equality(ty, curr_ty));
+                Frame::ExitStem(n, inner) => {
+                    let ty = node_types.get(&n).unwrap().clone();
+                    let inner_ty = node_types.get(&inner).unwrap().clone();
+                    self.constraints.push(Constraint::Equality(ty, Type::Stem(Box::new(inner_ty))));
+                }
+                Frame::ExitFork(n, head, tail) => {
+                    let ty = node_types.get(&n).unwrap().clone();
+                    let h_ty = node_types.get(&head).unwrap().clone();
+                    let t_ty = node_types.get(&tail).unwrap().clone();
+                    let pair_ty = Type::Pair(Box::new(h_ty), Box::new(t_ty));
+                    self.constraints.push(Constraint::Equality(ty, pair_ty));
+                }
+                Frame::ExitApp(n, func, args) => {
+                    let ty = node_types.get(&n).unwrap().clone();
+                    let func_ty = node_types.get(&func).unwrap().clone();
+                    let mut curr_ty = func_ty;
+                    for arg in args {
+                        let arg_ty = node_types.get(&arg).unwrap().clone();
+                        let res_ty = self.fresh_var();
+                        self.constraints.push(Constraint::Applicable(curr_ty.clone(), arg_ty, res_ty.clone()));
+                        curr_ty = res_ty;
+                    }
+                    self.constraints.push(Constraint::Equality(ty, curr_ty));
+                }
             }
-            Node::Prim(p) => {
-                let prim_ty = self.get_primitive_type(*p);
-                self.constraints.push(Constraint::Equality(ty, prim_ty));
-            }
-            _ => {}
         }
-        
+
         Ok(())
     }
     
@@ -252,259 +400,444 @@ impl InferenceEngine {
     
     // Coinductive Subtyping (Algorithm 3.4.2) with support for Forall and Rec
     pub fn is_subtype(&mut self, t1: Type, t2: Type, visited: &mut std::collections::HashSet<(Type, Type)>) -> bool {
-         if t1 == t2 { return true; }
-         if visited.contains(&(t1.clone(), t2.clone())) { return true; } // Cycle detection
-         visited.insert((t1.clone(), t2.clone()));
-         
-         match (t1, t2) {
-             (Type::Leaf, Type::Leaf) => true,
-             
-             // Rec Unfolding
-             (Type::Rec(id, body), t2) => {
-                 let rec_ty = Type::Rec(id, body.clone());
-                 let unrolled = Self::subst_rec(&body, id, &rec_ty);
-                 self.is_subtype(unrolled, t2, visited)
-             },
-             (t1, Type::Rec(id, body)) => {
-                 // Unrolling right:
-                 let rec_ty = Type::Rec(id, body.clone());
-                 let unrolled = Self::subst_rec(&body, id, &rec_ty);
-                 self.is_subtype(t1, unrolled, visited)
-             },
-             
-             // Forall Instantiation (Left)
-             // ∀X. T <= U  if  T[alpha/X] <= U  (where alpha is fresh existential/unification var)
-             (Type::Forall(name, body), t2) => {
-                 let alpha = self.fresh_var();
-                 let instantiated = Self::subst_generic(&body, &name, &alpha);
-                 self.is_subtype(instantiated, t2, visited)
-             },
-             
-             // Forall Generalization (Right)
-             // U <= ∀X. T  if  U <= T[skolem/X] (where skolem is fresh constant)
-             (t1, Type::Forall(name, body)) => {
-                 let skolem = self.fresh_skolem(&name);
-                 let instantiated = Self::subst_generic(&body, &name, &skolem);
-                 self.is_subtype(t1, instantiated, visited)
-             },
-             
-             // Union Right: T1 <= A | B if T1 <= A OR T1 <= B
-             (t1, Type::Union(ts)) => {
-                 // We must be careful not to commit unification on failed branches?
-                 // But we have mutable self.
-                 // Ideally we snapshot state. But simplified:
-                 // Try to unify with each. If one works, stop.
-                 // But unify mutates.
-                 // If we have to try multiple, we need backtracking?
-                 // For now, let's assume if it fails, it didn't mutate (mostly true for structural mismatch).
-                 // But `Float <= Var` unifies.
-                 // If we have Union(Var1, Var2). `Float` matches Var1.
-                 // This seems acceptable.
-                 for t in ts {
-                     // Hack: check if it MIGHT match before unifying?
-                     // Or just rely on greedy matching (first valid option).
-                     // This is standard for simple inference.
-                     if self.is_subtype(t1.clone(), t.clone(), visited) {
-                         return true;
-                     }
-                 }
-                 false
-             },
-             
-             // Union Left
-             (Type::Union(ts), t2) => {
-                 for t in ts {
-                     if !self.is_subtype(t.clone(), t2.clone(), visited) {
-                         return false;
-                     }
-                 }
-                 true
-             },
-             
-             (Type::Var(i), t) => {
-                 match self.unify(Type::Var(i), t) {
-                     Ok(_) => true,
-                     Err(_) => false,
-                 }
-             },
-             (t, Type::Var(i)) => {
-                 match self.unify(Type::Var(i), t) {
-                     Ok(_) => true,
-                     Err(_) => false,
-                 }
-             },
-             (Type::Generic(a), Type::Generic(b)) => a == b,
+        enum Frame {
+            Check(Type, Type),
+            AllPairs { pairs: Vec<(Type, Type)>, idx: usize },
+            AnyPairs { pairs: Vec<(Type, Type)>, idx: usize },
+        }
 
-             // Arrow Contravariance: A1->R1 <= A2->R2 if A2 <= A1 AND R1 <= R2
-             (Type::Arrow(a1, r1), Type::Arrow(a2, r2)) => {
-                 self.is_subtype(*a2, *a1, visited) && self.is_subtype(*r1, *r2, visited)
-             },
-             
-             // Structure Preserving
-             (Type::Stem(a), Type::Stem(b)) => self.is_subtype(*a, *b, visited),
-             (Type::Pair(a1, b1), Type::Pair(a2, b2)) => {
-                 self.is_subtype(*a1, *a2, visited) && self.is_subtype(*b1, *b2, visited)
-             },
+        let mut stack = vec![Frame::Check(t1, t2)];
+        let mut results: Vec<bool> = Vec::new();
 
-             // Leaf < U -> Stem(U)
-             (Type::Leaf, Type::Arrow(a, b)) => {
-                 let stem_a = Type::Stem(a);
-                 self.is_subtype(stem_a, *b, visited)
-             },
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Check(a, b) => {
+                    if a == b {
+                        results.push(true);
+                        continue;
+                    }
+                    if visited.contains(&(a.clone(), b.clone())) {
+                        results.push(true);
+                        continue;
+                    }
+                    visited.insert((a.clone(), b.clone()));
 
-             // Stem(U) < V -> Pair(U, V)
-             (Type::Stem(inner), Type::Arrow(arg, res)) => {
-                 let pair = Type::Pair(inner, arg);
-                 self.is_subtype(pair, *res, visited)
-             },
+                    match (a, b) {
+                        (Type::Leaf, Type::Leaf) => results.push(true),
+                        (Type::Rec(id, body), t2) => {
+                            let rec_ty = Type::Rec(id, body.clone());
+                            let unrolled = Self::subst_rec(&body, id, &rec_ty);
+                            stack.push(Frame::Check(unrolled, t2));
+                        }
+                        (t1, Type::Rec(id, body)) => {
+                            let rec_ty = Type::Rec(id, body.clone());
+                            let unrolled = Self::subst_rec(&body, id, &rec_ty);
+                            stack.push(Frame::Check(t1, unrolled));
+                        }
+                        (Type::Forall(name, body), t2) => {
+                            let alpha = self.fresh_var();
+                            let instantiated = Self::subst_generic(&body, &name, &alpha);
+                            stack.push(Frame::Check(instantiated, t2));
+                        }
+                        (t1, Type::Forall(name, body)) => {
+                            let skolem = self.fresh_skolem(&name);
+                            let instantiated = Self::subst_generic(&body, &name, &skolem);
+                            stack.push(Frame::Check(t1, instantiated));
+                        }
+                        (t1, Type::Union(ts)) => {
+                            if ts.is_empty() {
+                                results.push(false);
+                            } else {
+                                let pairs: Vec<(Type, Type)> = ts.into_iter().map(|t| (t1.clone(), t)).collect();
+                                let first = pairs[0].clone();
+                                stack.push(Frame::AnyPairs { pairs, idx: 0 });
+                                stack.push(Frame::Check(first.0, first.1));
+                            }
+                        }
+                        (Type::Union(ts), t2) => {
+                            if ts.is_empty() {
+                                results.push(true);
+                            } else {
+                                let pairs: Vec<(Type, Type)> = ts.into_iter().map(|t| (t, t2.clone())).collect();
+                                let first = pairs[0].clone();
+                                stack.push(Frame::AllPairs { pairs, idx: 0 });
+                                stack.push(Frame::Check(first.0, first.1));
+                            }
+                        }
+                        (Type::Var(i), t) => {
+                            if self.occurs_in(i, &t) {
+                                results.push(false);
+                            } else {
+                                self.substitutions.insert(i, t.clone());
+                                self.substitute(i, &t);
+                                results.push(true);
+                            }
+                        }
+                        (t, Type::Var(i)) => {
+                            if self.occurs_in(i, &t) {
+                                results.push(false);
+                            } else {
+                                self.substitutions.insert(i, t.clone());
+                                self.substitute(i, &t);
+                                results.push(true);
+                            }
+                        }
+                        (Type::Generic(a), Type::Generic(b)) => results.push(a == b),
+                        (Type::Arrow(a1, r1), Type::Arrow(a2, r2)) => {
+                            let pairs = vec![(*a2, *a1), (*r1, *r2)];
+                            let first = pairs[0].clone();
+                            stack.push(Frame::AllPairs { pairs, idx: 0 });
+                            stack.push(Frame::Check(first.0, first.1));
+                        }
+                        (Type::Stem(a), Type::Stem(b)) => {
+                            stack.push(Frame::Check(*a, *b));
+                        }
+                        (Type::Pair(a1, b1), Type::Pair(a2, b2)) => {
+                            let pairs = vec![(*a1, *a2), (*b1, *b2)];
+                            let first = pairs[0].clone();
+                            stack.push(Frame::AllPairs { pairs, idx: 0 });
+                            stack.push(Frame::Check(first.0, first.1));
+                        }
+                        (Type::Leaf, Type::Arrow(a, b)) => {
+                            let stem_a = Type::Stem(a);
+                            stack.push(Frame::Check(stem_a, *b));
+                        }
+                        (Type::Stem(inner), Type::Arrow(arg, res)) => {
+                            let pair = Type::Pair(inner, arg);
+                            stack.push(Frame::Check(pair, *res));
+                        }
+                        (Type::Pair(left, right), Type::Arrow(arg, res)) => {
+                            if matches!(left.as_ref(), Type::Leaf) {
+                                stack.push(Frame::Check(*right.clone(), *res));
+                                continue;
+                            }
+                            if matches!(arg.as_ref(), Type::Leaf) {
+                                if let Type::Pair(t, _v) = left.as_ref() {
+                                    stack.push(Frame::Check(*t.clone(), *res));
+                                    continue;
+                                }
+                            }
+                            if let Type::Stem(v_arg) = arg.as_ref() {
+                                if let Type::Pair(_u, v_arrow) = left.as_ref() {
+                                    if let Type::Arrow(v, t) = v_arrow.as_ref() {
+                                        let pairs = vec![(*v_arg.clone(), *v.clone()), (*t.clone(), *res.clone())];
+                                        let first = pairs[0].clone();
+                                        stack.push(Frame::AllPairs { pairs, idx: 0 });
+                                        stack.push(Frame::Check(first.0, first.1));
+                                        continue;
+                                    }
+                                }
+                            }
+                            if let Type::Pair(w1, w2) = arg.as_ref() {
+                                if let Type::Pair(_u, _v) = left.as_ref() {
+                                    if let Type::Arrow(w1_t, w2_arrow) = right.as_ref() {
+                                        if let Type::Arrow(w2_t, t) = w2_arrow.as_ref() {
+                                            let pairs = vec![
+                                                (*w1.clone(), *w1_t.clone()),
+                                                (*w2.clone(), *w2_t.clone()),
+                                                (*t.clone(), *res.clone()),
+                                            ];
+                                            let first = pairs[0].clone();
+                                            stack.push(Frame::AllPairs { pairs, idx: 0 });
+                                            stack.push(Frame::Check(first.0, first.1));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Type::Stem(s_inner) = left.as_ref() {
+                                if let Type::Arrow(u, uv) = s_inner.as_ref() {
+                                    if let Type::Arrow(v, t) = uv.as_ref() {
+                                        let pairs = vec![
+                                            (*right.clone(), Type::Arrow(u.clone(), v.clone())),
+                                            (*arg.clone(), *u.clone()),
+                                            (*t.clone(), *res.clone()),
+                                        ];
+                                        let first = pairs[0].clone();
+                                        stack.push(Frame::AllPairs { pairs, idx: 0 });
+                                        stack.push(Frame::Check(first.0, first.1));
+                                        continue;
+                                    }
+                                }
+                            }
+                            results.push(false);
+                        }
+                        (Type::Leaf, Type::Bool) => results.push(true),
+                        (Type::Stem(inner), Type::Bool) => {
+                            if matches!(inner.as_ref(), Type::Leaf) {
+                                results.push(true);
+                            } else {
+                                stack.push(Frame::Check(*inner.clone(), Type::Leaf));
+                            }
+                        }
+                        (Type::Bool, Type::Bool) => results.push(true),
+                        _ => results.push(false),
+                    }
+                }
+                Frame::AllPairs { pairs, idx } => {
+                    let left = results.pop().unwrap_or(false);
+                    if !left {
+                        results.push(false);
+                    } else {
+                        let next = idx + 1;
+                        if next >= pairs.len() {
+                            results.push(true);
+                        } else {
+                            let pair = pairs[next].clone();
+                            stack.push(Frame::AllPairs { pairs, idx: next });
+                            stack.push(Frame::Check(pair.0, pair.1));
+                        }
+                    }
+                }
+                Frame::AnyPairs { pairs, idx } => {
+                    let left = results.pop().unwrap_or(false);
+                    if left {
+                        results.push(true);
+                    } else {
+                        let next = idx + 1;
+                        if next >= pairs.len() {
+                            results.push(false);
+                        } else {
+                            let pair = pairs[next].clone();
+                            stack.push(Frame::AnyPairs { pairs, idx: next });
+                            stack.push(Frame::Check(pair.0, pair.1));
+                        }
+                    }
+                }
+            }
+        }
 
-             // Fork subtyping axioms for triage calculus
-             (Type::Pair(left, right), Type::Arrow(arg, res)) => {
-                 // K axiom: F L U < V -> U
-                 if matches!(left.as_ref(), Type::Leaf) {
-                     return self.is_subtype(*right.clone(), *res, visited);
-                 }
-
-                 // Leaf-case triage: F (F T V) W < L -> T
-                 if matches!(arg.as_ref(), Type::Leaf) {
-                     if let Type::Pair(t, _v) = left.as_ref() {
-                         return self.is_subtype(*t.clone(), *res, visited);
-                     }
-                 }
-
-                 // Stem-case triage: F (F U (V -> T)) W < S V -> T
-                 if let Type::Stem(v_arg) = arg.as_ref() {
-                     if let Type::Pair(_u, v_arrow) = left.as_ref() {
-                         if let Type::Arrow(v, t) = v_arrow.as_ref() {
-                             return self.is_subtype(*v_arg.clone(), *v.clone(), visited)
-                                 && self.is_subtype(*t.clone(), *res, visited);
-                         }
-                     }
-                 }
-
-                 // Fork-case triage: F (F U V) (W1 -> W2 -> T) < F W1 W2 -> T
-                 if let Type::Pair(w1, w2) = arg.as_ref() {
-                     if let Type::Pair(_u, _v) = left.as_ref() {
-                         if let Type::Arrow(w1_t, w2_arrow) = right.as_ref() {
-                             if let Type::Arrow(w2_t, t) = w2_arrow.as_ref() {
-                                 return self.is_subtype(*w1.clone(), *w1_t.clone(), visited)
-                                     && self.is_subtype(*w2.clone(), *w2_t.clone(), visited)
-                                     && self.is_subtype(*t.clone(), *res, visited);
-                             }
-                         }
-                     }
-                 }
-
-                 // S axiom: F (S (U -> V -> T)) (U -> V) < U -> T
-                 if let Type::Stem(s_inner) = left.as_ref() {
-                     if let Type::Arrow(u, uv) = s_inner.as_ref() {
-                         if let Type::Arrow(v, t) = uv.as_ref() {
-                             let s_ok = self.is_subtype(*right.clone(), Type::Arrow(u.clone(), v.clone()), visited)
-                                 && self.is_subtype(*arg.clone(), *u.clone(), visited)
-                                 && self.is_subtype(*t.clone(), *res, visited);
-                             if s_ok {
-                                 return true;
-                             }
-                         }
-                     }
-                 }
-
-                 false
-             },
-             
-             // Bool Subtyping
-             (Type::Leaf, Type::Bool) => true,
-             (Type::Stem(inner), Type::Bool) => {
-                 match inner.as_ref() {
-                     Type::Leaf => true,
-                     _ => self.is_subtype(*inner.clone(), Type::Leaf, visited) // Stem(T) <: Bool if T <: Leaf (i.e. T is Leaf)
-                 }
-             },
-             (Type::Bool, Type::Bool) => true,
-             // Bool is NOT subtype of Leaf or Stem(Leaf) generally, unless we downcast? No.
-
-             // Recursive types not fully handled yet
-             _ => false
-         }
+        results.pop().unwrap_or(false)
     }
     
     pub fn resolve_type(&self, ty: Type) -> Type {
-        match ty {
-            Type::Var(id) => {
-                if let Some(sub) = self.substitutions.get(&id) {
-                    self.resolve_type(sub.clone())
-                } else {
-                    Type::Var(id)
+        enum Frame {
+            Enter(Type),
+            ExitArrow,
+            ExitStem,
+            ExitPair,
+            ExitUnion(usize),
+            ExitRec(usize),
+            ExitForall(String),
+        }
+
+        let mut stack = vec![Frame::Enter(ty)];
+        let mut results: Vec<Type> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(t) => match t {
+                    Type::Var(id) => {
+                        if let Some(sub) = self.substitutions.get(&id) {
+                            stack.push(Frame::Enter(sub.clone()));
+                        } else {
+                            results.push(Type::Var(id));
+                        }
+                    }
+                    Type::Arrow(a, b) => {
+                        stack.push(Frame::ExitArrow);
+                        stack.push(Frame::Enter(*b));
+                        stack.push(Frame::Enter(*a));
+                    }
+                    Type::Stem(a) => {
+                        stack.push(Frame::ExitStem);
+                        stack.push(Frame::Enter(*a));
+                    }
+                    Type::Pair(a, b) => {
+                        stack.push(Frame::ExitPair);
+                        stack.push(Frame::Enter(*b));
+                        stack.push(Frame::Enter(*a));
+                    }
+                    Type::Union(ts) => {
+                        stack.push(Frame::ExitUnion(ts.len()));
+                        for t in ts.into_iter().rev() {
+                            stack.push(Frame::Enter(t));
+                        }
+                    }
+                    Type::Rec(id, body) => {
+                        stack.push(Frame::ExitRec(id));
+                        stack.push(Frame::Enter(*body));
+                    }
+                    Type::Forall(name, body) => {
+                        stack.push(Frame::ExitForall(name));
+                        stack.push(Frame::Enter(*body));
+                    }
+                    _ => results.push(t),
+                },
+                Frame::ExitArrow => {
+                    let b = results.pop().expect("missing arrow rhs");
+                    let a = results.pop().expect("missing arrow lhs");
+                    results.push(Type::Arrow(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitStem => {
+                    let a = results.pop().expect("missing stem inner");
+                    results.push(Type::Stem(Box::new(a)));
+                }
+                Frame::ExitPair => {
+                    let b = results.pop().expect("missing pair rhs");
+                    let a = results.pop().expect("missing pair lhs");
+                    results.push(Type::Pair(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitUnion(count) => {
+                    let mut ts = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        ts.push(results.pop().expect("missing union member"));
+                    }
+                    ts.reverse();
+                    results.push(Type::Union(ts));
+                }
+                Frame::ExitRec(id) => {
+                    let body = results.pop().expect("missing rec body");
+                    results.push(Type::Rec(id, Box::new(body)));
+                }
+                Frame::ExitForall(name) => {
+                    let body = results.pop().expect("missing forall body");
+                    results.push(Type::Forall(name, Box::new(body)));
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(Box::new(self.resolve_type(*a)), Box::new(self.resolve_type(*b))),
-            Type::Stem(a) => Type::Stem(Box::new(self.resolve_type(*a))),
-            Type::Pair(a, b) => Type::Pair(Box::new(self.resolve_type(*a)), Box::new(self.resolve_type(*b))),
-            Type::Union(ts) => Type::Union(ts.into_iter().map(|t| self.resolve_type(t)).collect()),
-            Type::Rec(id, body) => Type::Rec(id, Box::new(self.resolve_type(*body))),
-            Type::Forall(name, body) => Type::Forall(name, Box::new(self.resolve_type(*body))),
-            _ => ty,
         }
+
+        results.pop().unwrap_or(Type::Var(0))
     }
     
     fn unify(&mut self, t1: Type, t2: Type) -> Result<(), String> {
-        match (t1, t2) {
-            (Type::Var(i), Type::Var(j)) if i == j => Ok(()),
-            (Type::Var(i), t) | (t, Type::Var(i)) => {
-                if self.occurs_in(i, &t) {
-                    return Err("Occurs check failed: cyclic type detected".to_string());
-                }
-                self.substitutions.insert(i, t.clone());
-                self.substitute(i, &t);
-                Ok(())
-            }
-            (Type::Leaf, Type::Leaf) => Ok(()),
-            (Type::Float, Type::Float) => Ok(()),
-            (Type::Bool, Type::Bool) => Ok(()),
-            (Type::Arrow(a1, r1), Type::Arrow(a2, r2)) => {
-                self.unify(*a1, *a2)?;
-                self.unify(*r1, *r2)
-            }
-            (Type::Stem(i1), Type::Stem(i2)) => self.unify(*i1, *i2),
-            (Type::Pair(a1, b1), Type::Pair(a2, b2)) => {
-                self.unify(*a1, *a2)?;
-                self.unify(*b1, *b2)
-            }
-            
-            // Structural/function relationships are handled via subtyping axioms.
-            
-            // Union Handling: T unifies with Union if T is subtype of one element
-            (t, Type::Union(ts)) | (Type::Union(ts), t) => {
-                let mut visited = std::collections::HashSet::new();
-                for member in &ts {
-                    if self.is_subtype(t.clone(), member.clone(), &mut visited) {
-                        return Ok(());
+        enum Frame {
+            Unify(Type, Type),
+            AllPairs { pairs: Vec<(Type, Type)>, idx: usize },
+            AnyUnify { t: Type, members: Vec<Type>, idx: usize },
+        }
+
+        let mut stack = vec![Frame::Unify(t1, t2)];
+        let mut results: Vec<bool> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Unify(a, b) => match (a, b) {
+                    (Type::Var(i), Type::Var(j)) if i == j => results.push(true),
+                    (Type::Var(i), t) | (t, Type::Var(i)) => {
+                        if self.occurs_in(i, &t) {
+                            results.push(false);
+                        } else {
+                            self.substitutions.insert(i, t.clone());
+                            self.substitute(i, &t);
+                            results.push(true);
+                        }
+                    }
+                    (Type::Leaf, Type::Leaf) => results.push(true),
+                    (Type::Float, Type::Float) => results.push(true),
+                    (Type::Bool, Type::Bool) => results.push(true),
+                    (Type::Arrow(a1, r1), Type::Arrow(a2, r2)) => {
+                        let pairs = vec![(*a1, *a2), (*r1, *r2)];
+                        let first = pairs[0].clone();
+                        stack.push(Frame::AllPairs { pairs, idx: 0 });
+                        stack.push(Frame::Unify(first.0, first.1));
+                    }
+                    (Type::Stem(i1), Type::Stem(i2)) => {
+                        stack.push(Frame::Unify(*i1, *i2));
+                    }
+                    (Type::Pair(a1, b1), Type::Pair(a2, b2)) => {
+                        let pairs = vec![(*a1, *a2), (*b1, *b2)];
+                        let first = pairs[0].clone();
+                        stack.push(Frame::AllPairs { pairs, idx: 0 });
+                        stack.push(Frame::Unify(first.0, first.1));
+                    }
+                    (t, Type::Union(ts)) | (Type::Union(ts), t) => {
+                        let mut visited = std::collections::HashSet::new();
+                        let mut ok = false;
+                        for member in &ts {
+                            if self.is_subtype(t.clone(), member.clone(), &mut visited) {
+                                ok = true;
+                                break;
+                            }
+                        }
+                        if ok {
+                            results.push(true);
+                        } else if ts.is_empty() {
+                            results.push(false);
+                        } else {
+                            let members = ts;
+                            let first = members[0].clone();
+                            stack.push(Frame::AnyUnify { t: t.clone(), members, idx: 0 });
+                            stack.push(Frame::Unify(t, first));
+                        }
+                    }
+                    _ => results.push(false),
+                },
+                Frame::AllPairs { pairs, idx } => {
+                    let left = results.pop().unwrap_or(false);
+                    if !left {
+                        results.push(false);
+                    } else {
+                        let next = idx + 1;
+                        if next >= pairs.len() {
+                            results.push(true);
+                        } else {
+                            let pair = pairs[next].clone();
+                            stack.push(Frame::AllPairs { pairs, idx: next });
+                            stack.push(Frame::Unify(pair.0, pair.1));
+                        }
                     }
                 }
-                // If no direct subtype, try unifying with first compatible member
-                for member in ts {
-                    if self.unify(t.clone(), member).is_ok() {
-                        return Ok(());
+                Frame::AnyUnify { t, members, idx } => {
+                    let left = results.pop().unwrap_or(false);
+                    if left {
+                        results.push(true);
+                    } else {
+                        let next = idx + 1;
+                        if next >= members.len() {
+                            results.push(false);
+                        } else {
+                            let member = members[next].clone();
+                            stack.push(Frame::AnyUnify { t: t.clone(), members, idx: next });
+                            stack.push(Frame::Unify(t, member));
+                        }
                     }
                 }
-                Err(format!("Type {:?} not in Union", t))
             }
-            
-            _ => Err("Type Mismatch".to_string()),
+        }
+
+        if results.pop().unwrap_or(false) {
+            Ok(())
+        } else {
+            Err("Type Mismatch".to_string())
         }
     }
     
     fn occurs_in(&self, var: usize, ty: &Type) -> bool {
-        match ty {
-            Type::Var(i) => *i == var,
-            Type::Arrow(a, b) => self.occurs_in(var, a) || self.occurs_in(var, b),
-            Type::Stem(a) => self.occurs_in(var, a),
-            Type::Pair(a, b) => self.occurs_in(var, a) || self.occurs_in(var, b),
-            Type::Union(ts) => ts.iter().any(|t| self.occurs_in(var, t)),
-            Type::Rec(_, body) => self.occurs_in(var, body),
-            Type::Forall(_, body) => self.occurs_in(var, body),
-            _ => false,
+        let mut stack = vec![ty];
+        while let Some(t) = stack.pop() {
+            match t {
+                Type::Var(i) => {
+                    if *i == var {
+                        return true;
+                    }
+                }
+                Type::Arrow(a, b) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+                Type::Stem(a) => {
+                    stack.push(a);
+                }
+                Type::Pair(a, b) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+                Type::Union(ts) => {
+                    for t in ts {
+                        stack.push(t);
+                    }
+                }
+                Type::Rec(_, body) => {
+                    stack.push(body);
+                }
+                Type::Forall(_, body) => {
+                    stack.push(body);
+                }
+                _ => {}
+            }
         }
+        false
     }
     
     fn substitute(&mut self, var: usize, replacement: &Type) {
@@ -528,20 +861,63 @@ impl InferenceEngine {
     }
     
     fn subst_ty(ty: &mut Type, var: usize, replacement: &Type) -> Type {
-        match ty {
-            Type::Var(i) if *i == var => replacement.clone(),
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(Self::subst_ty(a, var, replacement)),
-                Box::new(Self::subst_ty(b, var, replacement))
-            ),
-            Type::Stem(a) => Type::Stem(Box::new(Self::subst_ty(a, var, replacement))),
-            Type::Pair(a, b) => Type::Pair(
-                Box::new(Self::subst_ty(a, var, replacement)),
-                Box::new(Self::subst_ty(b, var, replacement))
-            ),
-            Type::Forall(n, body) => Type::Forall(n.clone(), Box::new(Self::subst_ty(body, var, replacement))),
-            _ => ty.clone(),
+        enum Frame<'a> {
+            Enter(&'a Type),
+            ExitArrow,
+            ExitStem,
+            ExitPair,
+            ExitForall(String),
         }
+
+        let mut stack = vec![Frame::Enter(ty)];
+        let mut results: Vec<Type> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(t) => match t {
+                    Type::Var(i) if *i == var => results.push(replacement.clone()),
+                    Type::Arrow(a, b) => {
+                        stack.push(Frame::ExitArrow);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Stem(a) => {
+                        stack.push(Frame::ExitStem);
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Pair(a, b) => {
+                        stack.push(Frame::ExitPair);
+                        stack.push(Frame::Enter(b));
+                        stack.push(Frame::Enter(a));
+                    }
+                    Type::Forall(n, body) => {
+                        stack.push(Frame::ExitForall(n.clone()));
+                        stack.push(Frame::Enter(body));
+                    }
+                    _ => results.push(t.clone()),
+                },
+                Frame::ExitArrow => {
+                    let b = results.pop().expect("missing arrow rhs");
+                    let a = results.pop().expect("missing arrow lhs");
+                    results.push(Type::Arrow(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitStem => {
+                    let a = results.pop().expect("missing stem inner");
+                    results.push(Type::Stem(Box::new(a)));
+                }
+                Frame::ExitPair => {
+                    let b = results.pop().expect("missing pair rhs");
+                    let a = results.pop().expect("missing pair lhs");
+                    results.push(Type::Pair(Box::new(a), Box::new(b)));
+                }
+                Frame::ExitForall(n) => {
+                    let body = results.pop().expect("missing forall body");
+                    results.push(Type::Forall(n, Box::new(body)));
+                }
+            }
+        }
+
+        results.pop().unwrap_or_else(|| ty.clone())
     }
 
     fn get_number_type(&mut self) -> Type {
@@ -641,48 +1017,91 @@ impl InferenceEngine {
         // Type::Var(0) represents "Any" / Unconstrained
         let any = || Type::Var(0);
         
-        match ty {
-            Type::Leaf => (any(), any(), any()),
-            Type::Stem(inner) => (*inner.clone(), any(), any()),
-            Type::Pair(l, r) => (any(), *l.clone(), *r.clone()),
-            Type::Arrow(_, _) => (any(), any(), any()), 
-            Type::Bool => (Type::Leaf, any(), any()), 
-            Type::Union(ts) => {
-                let mut stems = Vec::new();
-                let mut lefts = Vec::new();
-                let mut rights = Vec::new();
-                
-                for t in ts {
-                    let (s, l, r) = Self::propagate_type_constraints(t);
-                    stems.push(s);
-                    lefts.push(l);
-                    rights.push(r);
-                }
-                
-                (Type::Union(stems), Type::Union(lefts), Type::Union(rights))
-            },
-            Type::Forall(_, body) => Self::propagate_type_constraints(body),
-             _ => (any(), any(), any())
+        enum Frame<'a> {
+            Enter(&'a Type),
+            ExitUnion(usize),
         }
+
+        let mut stack = vec![Frame::Enter(ty)];
+        let mut results: Vec<(Type, Type, Type)> = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(t) => match t {
+                    Type::Leaf => results.push((any(), any(), any())),
+                    Type::Stem(inner) => results.push((inner.as_ref().clone(), any(), any())),
+                    Type::Pair(l, r) => results.push((any(), l.as_ref().clone(), r.as_ref().clone())),
+                    Type::Arrow(_, _) => results.push((any(), any(), any())),
+                    Type::Bool => results.push((Type::Leaf, any(), any())),
+                    Type::Union(ts) => {
+                        stack.push(Frame::ExitUnion(ts.len()));
+                        for t in ts.iter().rev() {
+                            stack.push(Frame::Enter(t));
+                        }
+                    }
+                    Type::Forall(_, body) => {
+                        stack.push(Frame::Enter(body));
+                    }
+                    _ => results.push((any(), any(), any())),
+                },
+                Frame::ExitUnion(count) => {
+                    let mut stems = Vec::with_capacity(count);
+                    let mut lefts = Vec::with_capacity(count);
+                    let mut rights = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let (s, l, r) = results.pop().expect("missing union constraint");
+                        stems.push(s);
+                        lefts.push(l);
+                        rights.push(r);
+                    }
+                    stems.reverse();
+                    lefts.reverse();
+                    rights.reverse();
+                    results.push((Type::Union(stems), Type::Union(lefts), Type::Union(rights)));
+                }
+            }
+        }
+
+        results.pop().unwrap_or_else(|| (any(), any(), any()))
     }
 
     pub fn get_structural_mask(ty: &Type) -> [f64; 3] {
-        match ty {
-            Type::Leaf => [0.0, -f64::INFINITY, -f64::INFINITY],
-            Type::Stem(_) => [-f64::INFINITY, 0.0, -f64::INFINITY],
-            Type::Pair(_, _) => [-f64::INFINITY, -f64::INFINITY, 0.0],
-            Type::Arrow(_, _) => [0.0, 0.0, 0.0], 
-            Type::Union(ts) => {
-                 let mut mask = [-f64::INFINITY; 3];
-                 for t in ts {
-                     let m = Self::get_structural_mask(t);
-                     for i in 0..3 { mask[i] = mask[i].max(m[i]); }
-                 }
-                 mask
-            },
-            Type::Bool => [0.0, 0.0, -f64::INFINITY], 
-            Type::Rec(_, _) | Type::Var(_) | Type::RecVar(_) | Type::Forall(_, _) | Type::Generic(_) => [0.0, 0.0, 0.0],
-            _ => [0.0, 0.0, 0.0]
+        let mut stack: Vec<&Type> = vec![ty];
+        let mut mask = [-f64::INFINITY; 3];
+
+        while let Some(t) = stack.pop() {
+            match t {
+                Type::Leaf => {
+                    mask[0] = mask[0].max(0.0);
+                }
+                Type::Stem(_) => {
+                    mask[1] = mask[1].max(0.0);
+                }
+                Type::Pair(_, _) => {
+                    mask[2] = mask[2].max(0.0);
+                }
+                Type::Arrow(_, _) | Type::Rec(_, _) | Type::Var(_) | Type::RecVar(_) | Type::Forall(_, _) | Type::Generic(_) => {
+                    for i in 0..3 {
+                        mask[i] = mask[i].max(0.0);
+                    }
+                }
+                Type::Bool => {
+                    mask[0] = mask[0].max(0.0);
+                    mask[1] = mask[1].max(0.0);
+                }
+                Type::Union(ts) => {
+                    for inner in ts {
+                        stack.push(inner);
+                    }
+                }
+                _ => {
+                    for i in 0..3 {
+                        mask[i] = mask[i].max(0.0);
+                    }
+                }
+            }
         }
+
+        mask
     }
 }

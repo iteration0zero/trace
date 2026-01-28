@@ -79,41 +79,59 @@ fn build_tree<'a, I>(
     sample: bool
 ) -> NodeId 
 where I: Iterator<Item = (usize, &'a SoftGene)> {
-    if depth == 0 {
-        if let Some((idx, gene)) = leaves.next() {
-            let choice = if sample {
-                sample_logits(&gene.logits)
-            } else {
-                argmax(&gene.logits)
-            };
-            
-            choices_out.push(choice);
-            
-            // Compile Gene Variant
-            let g_gene = match choice {
-                0 => Gene::S,
-                1 => Gene::K,
-                2 => Gene::I,
-                3 => Gene::Leaf,
-                4 => Gene::First,
-                5 => Gene::Rest,
-                _ => Gene::Leaf,
-            };
-            
-            // Compile Pure and track nodes
-            let root = g_gene.compile_pure(g);
-            
-            // Mark root as blamed on this leaf
-            blamer.insert(root, idx);
-            
-            return root;
-        }
-        g.add(Node::Leaf)
-    } else {
-        let l = build_tree(g, depth - 1, leaves, blamer, choices_out, sample);
-        let r = build_tree(g, depth - 1, leaves, blamer, choices_out, sample);
-        g.add(Node::App { func: l, args: smallvec::smallvec![r] })
+    enum Frame {
+        Enter(usize),
+        ExitApp,
     }
+
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut results: Vec<NodeId> = Vec::new();
+    stack.push(Frame::Enter(depth));
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(d) => {
+                if d == 0 {
+                    if let Some((idx, gene)) = leaves.next() {
+                        let choice = if sample {
+                            sample_logits(&gene.logits)
+                        } else {
+                            argmax(&gene.logits)
+                        };
+
+                        choices_out.push(choice);
+
+                        let g_gene = match choice {
+                            0 => Gene::S,
+                            1 => Gene::K,
+                            2 => Gene::I,
+                            3 => Gene::Leaf,
+                            4 => Gene::First,
+                            5 => Gene::Rest,
+                            _ => Gene::Leaf,
+                        };
+
+                        let root = g_gene.compile_pure(g);
+                        blamer.insert(root, idx);
+                        results.push(root);
+                    } else {
+                        results.push(g.add(Node::Leaf));
+                    }
+                } else {
+                    stack.push(Frame::ExitApp);
+                    stack.push(Frame::Enter(d - 1));
+                    stack.push(Frame::Enter(d - 1));
+                }
+            }
+            Frame::ExitApp => {
+                let right = results.pop().unwrap_or_else(|| g.add(Node::Leaf));
+                let left = results.pop().unwrap_or_else(|| g.add(Node::Leaf));
+                results.push(g.add(Node::App { func: left, args: smallvec::smallvec![right] }));
+            }
+        }
+    }
+
+    results.pop().unwrap_or_else(|| g.add(Node::Leaf))
 }
 
 pub fn softmax(logits: &[f64]) -> Vec<f64> {

@@ -8,56 +8,95 @@ pub fn get_identity(g: &mut Graph) -> NodeId {
 }
 
 pub fn diff(g: &mut Graph, program: NodeId, variable: NodeId) -> LinearCombination {
-    if program == variable {
-        let i = get_identity(g);
-        return LinearCombination::from_node(i);
+    use std::collections::HashMap;
+
+    enum Frame {
+        Enter(NodeId),
+        Exit(NodeId),
     }
 
-    let node = g.get(program).clone();
-    
-    match node {
-        Node::Fork(u, v) => {
-            let du = diff(g, u, variable);
-            let dv = diff(g, v, variable);
-            du.add(dv)
-        }
-        
-        Node::Stem(u) => {
-            // D(4 u) = 4 (Du)
-            let du = diff(g, u, variable);
-            let leaf = g.add(Node::Leaf);
-            apply_func_to_lc(g, leaf, &du)
-        }
-        
-        Node::App { func, args } => {
-            // Check if func is a non-differentiable primitive (Comparator)
-            if let Node::Prim(p) = g.get(func) {
-                match p {
-                    Primitive::Eq | Primitive::Gt | Primitive::Lt | Primitive::If => return LinearCombination::zero(),
-                    _ => {}
+    let mut memo: HashMap<NodeId, LinearCombination> = HashMap::new();
+    let mut stack = vec![Frame::Enter(program)];
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(curr) => {
+                if memo.contains_key(&curr) {
+                    continue;
+                }
+                if curr == variable {
+                    let i = get_identity(g);
+                    memo.insert(curr, LinearCombination::from_node(i));
+                    continue;
+                }
+                match g.get(curr).clone() {
+                    Node::Fork(u, v) => {
+                        stack.push(Frame::Exit(curr));
+                        stack.push(Frame::Enter(v));
+                        stack.push(Frame::Enter(u));
+                    }
+                    Node::Stem(u) => {
+                        stack.push(Frame::Exit(curr));
+                        stack.push(Frame::Enter(u));
+                    }
+                    Node::App { func, args } => {
+                        if let Node::Prim(p) = g.get(func) {
+                            match p {
+                                Primitive::Eq | Primitive::Gt | Primitive::Lt | Primitive::If => {
+                                    memo.insert(curr, LinearCombination::zero());
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        stack.push(Frame::Exit(curr));
+                        for &arg in args.iter().rev() {
+                            stack.push(Frame::Enter(arg));
+                        }
+                        stack.push(Frame::Enter(func));
+                    }
+                    _ => {
+                        memo.insert(curr, LinearCombination::zero());
+                    }
                 }
             }
-
-            let mut current_lc = diff(g, func, variable);
-            let mut p_curr = func;
-            
-            for &arg in &args {
-                let da = diff(g, arg, variable);
-                // term1 = (D P_prev) arg
-                let term1 = apply_lc_to_arg(g, &current_lc, arg);
-                // term2 = P_prev (D arg)
-                let term2 = apply_func_to_lc(g, p_curr, &da);
-                
-                current_lc = term1.add(term2);
-                
-                // Update P_curr => App(P_curr, arg)
-                p_curr = g.add(Node::App { func: p_curr, args: smallvec![arg] });
+            Frame::Exit(curr) => {
+                if memo.contains_key(&curr) {
+                    continue;
+                }
+                let lc = match g.get(curr).clone() {
+                    Node::Fork(u, v) => {
+                        let du = memo.get(&u).cloned().unwrap_or_else(LinearCombination::zero);
+                        let dv = memo.get(&v).cloned().unwrap_or_else(LinearCombination::zero);
+                        du.add(dv)
+                    }
+                    Node::Stem(u) => {
+                        let du = memo.get(&u).cloned().unwrap_or_else(LinearCombination::zero);
+                        let leaf = g.add(Node::Leaf);
+                        apply_func_to_lc(g, leaf, &du)
+                    }
+                    Node::App { func, args } => {
+                        let mut current_lc =
+                            memo.get(&func).cloned().unwrap_or_else(LinearCombination::zero);
+                        let mut p_curr = func;
+                        for &arg in &args {
+                            let da =
+                                memo.get(&arg).cloned().unwrap_or_else(LinearCombination::zero);
+                            let term1 = apply_lc_to_arg(g, &current_lc, arg);
+                            let term2 = apply_func_to_lc(g, p_curr, &da);
+                            current_lc = term1.add(term2);
+                            p_curr = g.add(Node::App { func: p_curr, args: smallvec![arg] });
+                        }
+                        current_lc
+                    }
+                    _ => LinearCombination::zero(),
+                };
+                memo.insert(curr, lc);
             }
-            current_lc
         }
-        
-        _ => LinearCombination::zero(),
     }
+
+    memo.remove(&program).unwrap_or_else(LinearCombination::zero)
 }
 
 fn apply_lc_to_arg(g: &mut Graph, lc: &LinearCombination, arg: NodeId) -> LinearCombination {
